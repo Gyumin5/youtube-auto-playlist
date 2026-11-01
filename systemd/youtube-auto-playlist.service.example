@@ -1,0 +1,26 @@
+# 상주로 돌리고 싶을 때 쓰는 본보기. 그대로 설치되지는 않는다 — 아래 세 줄을 직접 해야 한다.
+#
+#   cp systemd/youtube-auto-playlist.service.example ~/.config/systemd/user/youtube-auto-playlist.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now youtube-auto-playlist.service
+#
+# 로그 보기:  journalctl --user -u youtube-auto-playlist -f
+# 멈추기:     systemctl --user stop youtube-auto-playlist
+#
+# 처음 한 번은 화면이 있는 자리에서 로그인해 둬야 한다 (python main.py --auth-only).
+# 상주로 도는 중에는 브라우저를 열지 않는다 — 토큰이 없으면 그 사실을 로그에 남기고 선다.
+
+[Unit]
+Description=구독 채널의 새 영상을 채널별 재생목록에 넣는다
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/youtube-auto-playlist
+ExecStart=%h/youtube-auto-playlist/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=default.target

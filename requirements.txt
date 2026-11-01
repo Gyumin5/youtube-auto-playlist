@@ -1,0 +1,8 @@
+# 설치: pip install -r requirements.txt
+# 실제로 설치된 판본은 requirements.lock.txt 에 박아 뒀다 — 재현이 필요하면 그쪽을 쓴다.
+google-api-python-client>=2.100
+google-auth>=2.30
+google-auth-oauthlib>=1.2
+feedparser>=6.0
+python-dotenv>=1.0
+PyYAML>=6.0

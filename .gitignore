@@ -1,0 +1,18 @@
+# 비밀과 자격
+.env
+client_secret.json
+client_secret*.json
+token.json
+token.json.invalid
+
+# 내 설정과 기록
+config.yaml
+state/
+*.sqlite3
+youtube_auto_add.log
+youtube_auto_add.log.*
+
+# 파이썬
+.venv/
+__pycache__/
+*.pyc
