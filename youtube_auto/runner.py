@@ -33,6 +33,7 @@ class RunStats:
     added: int = 0
     duplicates: int = 0
     seeded: int = 0
+    too_short: int = 0
     skipped_videos: int = 0
     playlist_errors: int = 0
     quota_exceeded: bool = False
@@ -45,14 +46,26 @@ class RunStats:
         return (
             f"채널 {self.channels}개 · 새 영상 {self.new_videos}개 · 넣음 {self.added}개 · "
             f"이미 있음 {self.duplicates}개 · 첫 회차 기록만 {self.seeded}개 · "
+            f"짧아서 거름 {self.too_short}개 · "
             f"건너뜀 {self.skipped_videos}개 · 조회 오류 {self.lookup_errors}개 · "
             f"재생목록 오류 {self.playlist_errors}개"
             + (" · 할당량 소진" if self.quota_exceeded else "")
         )
 
 
-def run_once(config, store, client, fetch: Optional[Callable] = None) -> RunStats:
-    """fetch 는 채널 아이디를 받아 영상 목록을 돌려주는 함수다 (UploadsClient.fetch)."""
+def run_once(
+    config,
+    store,
+    client,
+    fetch: Optional[Callable] = None,
+    durations: Optional[Callable] = None,
+) -> RunStats:
+    """한 회차를 돈다.
+
+    fetch 는 채널 아이디를 받아 영상 목록을 돌려준다 (UploadsClient.fetch).
+    durations 는 영상 아이디 목록을 받아 길이를 초로 돌려준다 (UploadsClient.durations).
+    최소 길이를 적은 채널이 있을 때만 쓴다.
+    """
     if fetch is None:
         raise TypeError("fetch 를 넘겨야 한다 — 조회에도 로그인한 계정이 필요하다.")
     stats = RunStats()
@@ -101,6 +114,54 @@ def run_once(config, store, client, fetch: Optional[Callable] = None) -> RunStat
         if not fresh:
             log.debug("%s: 새 영상 없음", rule.name)
             continue
+
+        if rule.min_duration_seconds:
+            if durations is None:
+                raise TypeError(
+                    f"{rule.name}: 최소 길이를 적었는데 길이를 물을 방법이 없다 — "
+                    "durations 를 넘겨야 한다."
+                )
+            try:
+                lengths = durations(
+                    [v.video_id for v in fresh], timeout=config.request_timeout_seconds
+                )
+            except QuotaExceeded as exc:
+                log.error("할당량 소진이라 이번 회차를 여기서 끝낸다 — %s", exc)
+                stats.quota_exceeded = True
+                return stats
+            except ChannelLookupError as exc:
+                # 길이를 모르면 넣을지 가릴 수 없다. 짧은 것을 넣느니 다음 회차에 다시 본다.
+                store.record_lookup_failure(rule.channel_id, str(exc))
+                stats.lookup_errors += 1
+                log.warning("%s: 길이를 못 물었다 — %s", rule.name, exc)
+                continue
+
+            kept = []
+            for video in fresh:
+                seconds = lengths.get(video.video_id)
+                if seconds is None:
+                    # 길이를 못 받은 영상만 보류한다. 기록하지 않으니 다음 회차에 다시 본다.
+                    log.warning("%s: 길이를 모르는 영상은 다음 회차에 다시 본다 — %s",
+                                rule.name, video.title)
+                    continue
+                if seconds < rule.min_duration_seconds:
+                    # 기록해 둔다. 안 그러면 목록에 남아 있는 동안 회차마다 다시 묻는다.
+                    store.mark_added(
+                        video.video_id, rule.playlist_id, rule.channel_id,
+                        title=video.title, published_at=video.published, source="too_short",
+                    )
+                    stats.too_short += 1
+                    continue
+                kept.append(video)
+
+            if len(kept) < len(fresh):
+                log.info(
+                    "%s: %d개 중 %d개만 %d분 기준을 넘는다.",
+                    rule.name, len(fresh), len(kept), rule.min_duration_seconds // 60,
+                )
+            fresh = kept
+            if not fresh:
+                continue
 
         stats.new_videos += len(fresh)
         batch = fresh[: config.max_videos_per_channel_per_run]
@@ -167,13 +228,20 @@ def next_delay(config, stats: RunStats) -> int:
     return config.quota_backoff_seconds if stats.quota_exceeded else config.check_interval_seconds
 
 
-def run_forever(config, store, client, fetch: Optional[Callable] = None, stop=None) -> None:
+def run_forever(
+    config,
+    store,
+    client,
+    fetch: Optional[Callable] = None,
+    durations: Optional[Callable] = None,
+    stop=None,
+) -> None:
     blackout = False  # 직전 회차에 어느 채널도 못 읽었나
     while True:
         if stop is not None and stop.is_set():
             break
         try:
-            stats = run_once(config, store, client, fetch=fetch)
+            stats = run_once(config, store, client, fetch=fetch, durations=durations)
             log.info("회차 끝 — %s", stats.summary())
             if stats.all_lookups_failed and not stats.quota_exceeded:
                 if not blackout:

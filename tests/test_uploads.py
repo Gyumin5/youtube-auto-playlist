@@ -14,6 +14,7 @@ from youtube_auto.uploads import (  # noqa: E402
     LookupTransientError,
     UploadsClient,
     UploadsNotAccessible,
+    parse_duration,
     uploads_playlist_id,
 )
 
@@ -41,13 +42,19 @@ def item(video_id, title="제목", published="2026-11-01T09:00:00Z"):
 
 
 class FakeYouTube:
-    """playlistItems().list(...).execute() 만 흉내 낸다."""
+    """playlistItems().list(...) 와 videos().list(...) 를 흉내 낸다."""
 
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)
         self.calls = []
+        self.endpoints = []
 
     def playlistItems(self):
+        self.endpoints.append("playlistItems")
+        return self
+
+    def videos(self):
+        self.endpoints.append("videos")
         return self
 
     def list(self, **kwargs):
@@ -165,6 +172,74 @@ class UploadsClientTest(unittest.TestCase):
         with self.assertRaises(LookupTransientError):
             client.fetch(CHANNEL)
         self.assertEqual(len(youtube.calls), 1)
+
+
+class ParseDurationTest(unittest.TestCase):
+    def test_시분초를_초로_바꾼다(self):
+        self.assertEqual(parse_duration("PT1H24M9S"), 5049)
+        self.assertEqual(parse_duration("PT46M52S"), 2812)
+        self.assertEqual(parse_duration("PT47S"), 47)
+        self.assertEqual(parse_duration("PT1M"), 60)
+
+    def test_하루를_넘기는_다시보기도_읽는다(self):
+        self.assertEqual(parse_duration("P1DT2H"), 93600)
+
+    def test_길이를_모르는_것과_0초는_다르다(self):
+        # 라이브 진행 중인 영상은 길이가 P0D 로 온다.
+        self.assertEqual(parse_duration("P0D"), 0)
+        self.assertIsNone(parse_duration(""))
+        self.assertIsNone(parse_duration("몰라"))
+
+
+class DurationsTest(unittest.TestCase):
+    def client(self, outcomes):
+        youtube = FakeYouTube(outcomes)
+        return UploadsClient(youtube, sleep=lambda _s: None), youtube
+
+    def test_영상마다_길이를_초로_돌려준다(self):
+        client, youtube = self.client([
+            {"items": [
+                {"id": "v1", "contentDetails": {"duration": "PT46M52S"}},
+                {"id": "v2", "contentDetails": {"duration": "PT47S"}},
+            ]}
+        ])
+        lengths = client.durations(["v1", "v2"])
+
+        self.assertEqual(lengths, {"v1": 2812, "v2": 47})
+        self.assertEqual(youtube.endpoints, ["videos"])
+        self.assertEqual(youtube.calls[0]["id"], "v1,v2")
+        self.assertEqual(youtube.calls[0]["part"], "contentDetails")
+
+    def test_한_번에_묻는다(self):
+        # 열다섯 개짜리 목록이 호출 하나(1단위)로 끝나야 한다.
+        ids = [f"v{i}" for i in range(15)]
+        client, youtube = self.client([
+            {"items": [{"id": i, "contentDetails": {"duration": "PT10M"}} for i in ids]}
+        ])
+        client.durations(ids)
+
+        self.assertEqual(len(youtube.calls), 1)
+
+    def test_길이를_못_읽은_영상은_빠진다(self):
+        client, _ = self.client([
+            {"items": [
+                {"id": "v1", "contentDetails": {"duration": "PT10M"}},
+                {"id": "v2", "contentDetails": {}},
+            ]}
+        ])
+        lengths = client.durations(["v1", "v2"])
+
+        self.assertEqual(lengths, {"v1": 600})
+
+    def test_물을_것이_없으면_부르지도_않는다(self):
+        client, youtube = self.client([])
+        self.assertEqual(client.durations([]), {})
+        self.assertEqual(youtube.calls, [])
+
+    def test_할당량_소진은_그대로_올린다(self):
+        client, _ = self.client([http_error(403, "quotaExceeded")])
+        with self.assertRaises(QuotaExceeded):
+            client.durations(["v1"])
 
 
 if __name__ == "__main__":

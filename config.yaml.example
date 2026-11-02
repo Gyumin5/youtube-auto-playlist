@@ -10,6 +10,11 @@
 # playlist_id 찾는 법: 재생목록을 열었을 때 주소의 list= 뒤에 붙는 값이다.
 #   보통 PL 로 시작한다. '나중에 볼 동영상'(WL)과 '좋아요 표시한 동영상'(LL)에는
 #   공개 API 로 넣을 수 없어서 거절한다.
+#
+# min_duration_minutes 는 선택이다. 적으면 그보다 짧은 영상은 안 넣는다 — 예고·하이라이트·
+#   쇼츠가 섞여 올라오는 채널에서 본편만 고르는 데 쓴다. 적은 채널마다 회차에 조회 1단위가
+#   더 든다(길이는 영상 목록에 안 들어 있어서 따로 묻는다). 거른 영상은 기록해 두므로
+#   다음 회차에 다시 묻지 않는다.
 
 channels:
   - name: 예시 채널 하나
@@ -19,6 +24,7 @@ channels:
   - name: 예시 채널 둘
     channel_id: UCBJycsmduvYEL83R_U4JriQ
     playlist_id: PLKcKU7ThUUvX2KBAJ3NsQZSTEI54V9hHk
+    min_duration_minutes: 40   # 40분 넘는 본편만 넣는다
 
 # 얼마나 자주 보나 (초). 최소 60.
 # 조회도 할당량을 쓰므로 너무 짧게 잡으면 시작할 때 거절하고 쓸 수 있는 주기를 알려 준다.

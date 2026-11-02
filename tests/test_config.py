@@ -78,6 +78,40 @@ class ConfigTest(unittest.TestCase):
         self.assertLessEqual(daily_lookup_units(20, needed), 5000)
         self.assertGreater(daily_lookup_units(20, needed - 1), 5000)
 
+    def test_최소_길이를_분으로_적으면_초로_바꿔_둔다(self):
+        text = (
+            f"channels:\n  - name: 가\n    channel_id: {CHANNEL_A}\n"
+            f"    playlist_id: {PLAYLIST_A}\n    min_duration_minutes: 40\n"
+            f"  - name: 나\n    channel_id: {CHANNEL_B}\n"
+            f"    playlist_id: {PLAYLIST_B}\ncheck_interval_seconds: 900\n"
+        )
+        config = self.load(text)
+        self.assertEqual(config.channels[0].min_duration_seconds, 2400)
+        self.assertEqual(config.channels[1].min_duration_seconds, 0)
+
+    def test_최소_길이를_적은_채널은_조회량을_하나씩_더_쓴다(self):
+        text = (
+            f"channels:\n  - name: 가\n    channel_id: {CHANNEL_A}\n"
+            f"    playlist_id: {PLAYLIST_A}\n    min_duration_minutes: 40\n"
+            f"  - name: 나\n    channel_id: {CHANNEL_B}\n"
+            f"    playlist_id: {PLAYLIST_B}\ncheck_interval_seconds: 3600\n"
+        )
+        config = self.load(text)
+        # 채널 2개 + 길이 조회 1개 = 회차당 3단위, 하루 24회차.
+        self.assertEqual(config.duration_checks, 1)
+        self.assertEqual(config.daily_lookup_units, 72)
+
+    def test_최소_길이가_0이거나_음수면_거절한다(self):
+        for bad in ("0", "-5", "사십"):
+            text = (
+                f"channels:\n  - name: 가\n    channel_id: {CHANNEL_A}\n"
+                f"    playlist_id: {PLAYLIST_A}\n    min_duration_minutes: {bad}\n"
+                "check_interval_seconds: 900\n"
+            )
+            with self.assertRaises(ConfigError, msg=f"{bad} 를 받아들였다") as ctx:
+                self.load(text)
+            self.assertIn("min_duration_minutes", str(ctx.exception))
+
     def test_채널마다_재생목록이_따로_붙는다(self):
         config = self.load(GOOD)
         self.assertEqual(len(config.channels), 2)

@@ -21,12 +21,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from youtube_auto.auth import AuthError, build_youtube, load_credentials
-from youtube_auto.config import (
-    ConfigError,
-    daily_lookup_units,
-    load_config,
-    resolve_log_file,
-)
+from youtube_auto.config import ConfigError, load_config, resolve_log_file
 from youtube_auto.playlist import DryRunClient, PlaylistClient
 from youtube_auto.resident import wait_until_ready
 from youtube_auto.runner import run_forever, run_once
@@ -92,12 +87,18 @@ def print_rules(config) -> None:
     print(f"채널 {len(config.channels)}개 — 각 채널의 새 영상은 아래 재생목록으로 간다.\n")
     width = max(len(rule.name) for rule in config.channels)
     for index, rule in enumerate(config.channels, start=1):
-        print(f"{index:>2}. {rule.name:<{width}}  {rule.channel_id}  →  {rule.playlist_id}")
+        limit = (
+            f"  ({rule.min_duration_seconds // 60}분 이상만)"
+            if rule.min_duration_seconds else ""
+        )
+        print(
+            f"{index:>2}. {rule.name:<{width}}  {rule.channel_id}  →  {rule.playlist_id}{limit}"
+        )
     print(
         f"\n확인 주기 {config.check_interval_seconds}초 · "
         f"회차당 채널마다 최대 {config.max_videos_per_channel_per_run}개 · "
         f"첫 회차 기록만 하기 {'켬' if config.seed_on_first_run else '끔'} · "
-        f"조회에 하루 {daily_lookup_units(len(config.channels), config.check_interval_seconds)}단위"
+        f"조회에 하루 {config.daily_lookup_units}단위"
     )
 
 
@@ -130,12 +131,13 @@ def run_resident(config_path, verbose: bool) -> int:
             "채널 %d개를 %d초마다 본다 (조회에 하루 %d단위). 기록 파일 %s",
             len(config.channels),
             config.check_interval_seconds,
-            daily_lookup_units(len(config.channels), config.check_interval_seconds),
+            config.daily_lookup_units,
             config.db_file,
         )
+        uploads = UploadsClient(youtube)
         run_forever(
             config, store, PlaylistClient(youtube),
-            fetch=UploadsClient(youtube).fetch, stop=stop,
+            fetch=uploads.fetch, durations=uploads.durations, stop=stop,
         )
         log.info("멈췄다.")
         return 0
@@ -186,7 +188,7 @@ def main(argv=None) -> int:
         return 1
 
     youtube = build_youtube(credentials)
-    fetch = UploadsClient(youtube).fetch
+    uploads = UploadsClient(youtube)
 
     if args.dry_run:
         client = DryRunClient()
@@ -198,7 +200,9 @@ def main(argv=None) -> int:
     # 진짜로 돌릴 때 첫 회차가 통째로 건너뛰어진다.
     store = ReadOnlyStore(Store(config.db_file)) if args.dry_run else Store(config.db_file)
     try:
-        stats = run_once(config, store, client, fetch=fetch)
+        stats = run_once(
+            config, store, client, fetch=uploads.fetch, durations=uploads.durations
+        )
         log.info("회차 끝 — %s", stats.summary())
         return 0
     finally:

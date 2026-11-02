@@ -385,6 +385,102 @@ class RunOnceTest(unittest.TestCase):
         self.assertIn("넣음 1개", stats.summary())
 
 
+class MinDurationTest(unittest.TestCase):
+    """최소 길이를 적은 채널 — 짧은 영상은 거르고 기록해 다시 묻지 않는다."""
+
+    def setUp(self):
+        self.store = Store(":memory:")
+        self.rules = (
+            ChannelRule(name="긴것만", channel_id=CH_A, playlist_id=PL_A,
+                        min_duration_seconds=2400),
+            ChannelRule(name="아무거나", channel_id=CH_B, playlist_id=PL_B),
+        )
+
+    def tearDown(self):
+        self.store.close()
+
+    def make_durations(self, mapping):
+        def durations(video_ids, timeout=20):
+            durations.calls.append(list(video_ids))
+            result = mapping
+            if isinstance(result, Exception):
+                raise result
+            return {vid: result[vid] for vid in video_ids if vid in result}
+
+        durations.calls = []
+        return durations
+
+    def test_기준보다_짧은_영상은_넣지_않는다(self):
+        fetch = make_fetch({CH_A: [video("본편", CH_A), video("예고", CH_A)], CH_B: []})
+        durations = self.make_durations({"본편": 2812, "예고": 47})
+        client = RecordingClient()
+        stats = run_once(make_config(self.rules), self.store, client,
+                         fetch=fetch, durations=durations)
+
+        self.assertEqual(client.calls, [("본편", PL_A)])
+        self.assertEqual(stats.too_short, 1)
+        self.assertEqual(stats.added, 1)
+
+    def test_걸러낸_영상은_기록해_다음_회차에_다시_묻지_않는다(self):
+        fetch = make_fetch({CH_A: [video("예고", CH_A)], CH_B: []})
+        durations = self.make_durations({"예고": 47})
+        run_once(make_config(self.rules), self.store, RecordingClient(),
+                 fetch=fetch, durations=durations)
+
+        again = self.make_durations({"예고": 47})
+        stats = run_once(make_config(self.rules), self.store, RecordingClient(),
+                         fetch=make_fetch({CH_A: [video("예고", CH_A)], CH_B: []}),
+                         durations=again)
+
+        self.assertEqual(again.calls, [])  # 물을 것이 없으니 할당량도 안 쓴다
+        self.assertEqual(stats.too_short, 0)
+
+    def test_최소_길이가_없는_채널은_길이를_묻지_않는다(self):
+        fetch = make_fetch({CH_A: [], CH_B: [video("b1", CH_B)]})
+        durations = self.make_durations({})
+        run_once(make_config(self.rules), self.store, RecordingClient(),
+                 fetch=fetch, durations=durations)
+
+        self.assertEqual(durations.calls, [])
+
+    def test_길이를_못_받은_영상은_보류하고_기록도_안_한다(self):
+        fetch = make_fetch({CH_A: [video("모름", CH_A)], CH_B: []})
+        durations = self.make_durations({})  # 그 영상이 답에 없다
+        client = RecordingClient()
+        stats = run_once(make_config(self.rules), self.store, client,
+                         fetch=fetch, durations=durations)
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(stats.too_short, 0)
+        self.assertFalse(self.store.is_added("모름", PL_A))
+
+    def test_길이_조회_할당량이_소진되면_회차를_끝낸다(self):
+        fetch = make_fetch({CH_A: [video("본편", CH_A)], CH_B: [video("b1", CH_B)]})
+        durations = self.make_durations(QuotaExceeded("오늘 치 끝"))
+        client = RecordingClient()
+        stats = run_once(make_config(self.rules), self.store, client,
+                         fetch=fetch, durations=durations)
+
+        self.assertTrue(stats.quota_exceeded)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(fetch.calls, [CH_A])  # 다음 채널은 조회도 안 한다
+
+    def test_길이를_못_물으면_그_채널만_건너뛴다(self):
+        fetch = make_fetch({CH_A: [video("본편", CH_A)], CH_B: [video("b1", CH_B)]})
+        durations = self.make_durations(LookupTransientError("못 물음"))
+        client = RecordingClient()
+        stats = run_once(make_config(self.rules), self.store, client,
+                         fetch=fetch, durations=durations)
+
+        self.assertEqual(client.calls, [("b1", PL_B)])
+        self.assertEqual(stats.lookup_errors, 1)
+
+    def test_최소_길이를_적었는데_길이를_물을_방법이_없으면_거절한다(self):
+        fetch = make_fetch({CH_A: [video("본편", CH_A)], CH_B: []})
+        with self.assertRaises(TypeError):
+            run_once(make_config(self.rules), self.store, RecordingClient(), fetch=fetch)
+
+
 class NextDelayTest(unittest.TestCase):
     def test_평소에는_설정한_주기만큼_쉰다(self):
         config = make_config()
