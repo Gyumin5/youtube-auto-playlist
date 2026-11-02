@@ -164,7 +164,7 @@ def run_once(
                 dropped["라이브"] += 1
                 continue
 
-            if info.duration_seconds <= SHORTS_MAX_SECONDS:
+            if not rule.include_shorts and info.duration_seconds <= SHORTS_MAX_SECONDS:
                 try:
                     short = shorts_check(
                         video.video_id, timeout=config.request_timeout_seconds

@@ -112,6 +112,38 @@ class ConfigTest(unittest.TestCase):
                 self.load(text)
             self.assertIn("min_duration_minutes", str(ctx.exception))
 
+    def test_쇼츠를_받는_채널은_표시로_남는다(self):
+        text = (
+            f"channels:\n  - name: 가\n    channel_id: {CHANNEL_A}\n"
+            f"    playlist_id: {PLAYLIST_A}\n    include_shorts: true\n"
+            f"  - name: 나\n    channel_id: {CHANNEL_B}\n"
+            f"    playlist_id: {PLAYLIST_B}\ncheck_interval_seconds: 900\n"
+        )
+        config = self.load(text)
+        self.assertTrue(config.channels[0].include_shorts)
+        self.assertFalse(config.channels[1].include_shorts)
+
+    def test_쇼츠_표시가_참거짓이_아니면_거절한다(self):
+        text = (
+            f"channels:\n  - name: 가\n    channel_id: {CHANNEL_A}\n"
+            f"    playlist_id: {PLAYLIST_A}\n    include_shorts: 네\n"
+            "check_interval_seconds: 900\n"
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            self.load(text)
+        self.assertIn("include_shorts", str(ctx.exception))
+
+    def test_쇼츠_받기와_최소_길이를_같이_쓰면_거절한다(self):
+        # 최소 길이가 쇼츠를 전부 걸러서 쇼츠 받기가 아무 일도 안 한다.
+        text = (
+            f"channels:\n  - name: 가\n    channel_id: {CHANNEL_A}\n"
+            f"    playlist_id: {PLAYLIST_A}\n    include_shorts: true\n"
+            "    min_duration_minutes: 35\ncheck_interval_seconds: 900\n"
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            self.load(text)
+        self.assertIn("include_shorts", str(ctx.exception))
+
     def test_채널마다_재생목록이_따로_붙는다(self):
         config = self.load(GOOD)
         self.assertEqual(len(config.channels), 2)

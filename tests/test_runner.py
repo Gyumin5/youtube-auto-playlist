@@ -533,6 +533,49 @@ class VideoFilterTest(unittest.TestCase):
         self.assertEqual(stats.shorts, 0)
         self.assertFalse(self.store.is_added("모름", PL_B))
 
+    # --- 쇼츠를 받는 전용 채널 (include_shorts)
+
+    def shorts_rules(self):
+        """CH_B 를 쇼츠까지 받는 전용 채널로 바꾼 설정."""
+        return (
+            self.rules[0],
+            ChannelRule(name="쇼츠전용", channel_id=CH_B, playlist_id=PL_B,
+                        include_shorts=True),
+        )
+
+    def test_쇼츠를_받는_채널은_쇼츠도_넣는다(self):
+        fetch = make_fetch({CH_B: [video("쇼츠", CH_B)], CH_A: []})
+        client = RecordingClient()
+        stats = run_once(make_config(self.shorts_rules()), self.store, client, fetch=fetch,
+                         video_meta=self.make_meta({"쇼츠": 35}),
+                         shorts_check=never_short)
+
+        self.assertEqual(client.calls, [("쇼츠", PL_B)])
+        self.assertEqual(stats.shorts, 0)
+        self.assertEqual(stats.added, 1)
+
+    def test_쇼츠를_받는_채널은_쇼츠인지_묻지_않는다(self):
+        # 어차피 다 넣으므로 물을 이유가 없다. 묻는 횟수만큼 느려진다.
+        fetch = make_fetch({CH_B: [video("쇼츠", CH_B)], CH_A: []})
+        shorts_check = self.make_shorts_check({"쇼츠"})
+        run_once(make_config(self.shorts_rules()), self.store, RecordingClient(), fetch=fetch,
+                 video_meta=self.make_meta({"쇼츠": 35}), shorts_check=shorts_check)
+
+        self.assertEqual(shorts_check.calls, [])
+
+    def test_쇼츠를_받는_채널도_라이브는_거른다(self):
+        # 운영자 요구(8042·8043)는 전 채널 공통이다. 쇼츠만 푼다.
+        fetch = make_fetch({CH_B: [video("생방", CH_B)], CH_A: []})
+        client = RecordingClient()
+        stats = run_once(
+            make_config(self.shorts_rules()), self.store, client, fetch=fetch,
+            video_meta=self.make_meta({"생방": VideoMeta(duration_seconds=0, is_live=True)}),
+            shorts_check=never_short,
+        )
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(stats.live, 1)
+
     # --- 라이브
 
     def test_라이브는_넣지_않고_기록한다(self):
