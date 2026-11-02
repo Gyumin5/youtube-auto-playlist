@@ -20,19 +20,19 @@ channels:
     channel_id: UCBJycsmduvYEL83R_U4JriQ
     playlist_id: PLKcKU7ThUUvX2KBAJ3NsQZSTEI54V9hHk
 
-# 피드를 얼마나 자주 보나 (초). 최소 60.
-# 유튜브 피드 자체가 몇 분 늦게 갱신되므로 더 짧게 잡아도 영상이 더 빨리 보이지 않는다.
+# 얼마나 자주 보나 (초). 최소 60.
+# 조회도 할당량을 쓰므로 너무 짧게 잡으면 시작할 때 거절하고 쓸 수 있는 주기를 알려 준다.
 check_interval_seconds: 3600
 
 # 하루 할당량을 다 쓴 회차 뒤에는 이만큼 쉰다 (초). 할당량은 태평양 시간 자정에 초기화된다.
 quota_backoff_seconds: 3600
 
 # 처음 보는 채널의 첫 회차는 넣지 않고 기록만 한다.
-# 피드에는 최근 열다섯 개가 들어 있어서, 켜 두지 않으면 첫 회차에 재생목록이 과거 영상으로 덮인다.
+# 한 번에 최근 열다섯 개를 받으므로, 켜 두지 않으면 첫 회차에 재생목록이 과거 영상으로 덮인다.
 seed_on_first_run: true
 
 # 한 회차에 채널 하나당 최대 몇 개까지 넣나. 나머지는 다음 회차로 넘어간다.
 max_videos_per_channel_per_run: 10
 
-# 피드 하나를 기다리는 제한시간 (초).
+# 조회 하나를 기다리는 제한시간 (초).
 request_timeout_seconds: 20

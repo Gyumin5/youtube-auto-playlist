@@ -6,7 +6,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from youtube_auto.config import ConfigError, load_config  # noqa: E402
+from youtube_auto.config import (  # noqa: E402
+    ConfigError,
+    daily_lookup_units,
+    load_config,
+    min_interval_for_budget,
+)
 
 CHANNEL_A = "UC_x5XG1OV2P6uZZ5FSM9Ttw"
 CHANNEL_B = "UCBJycsmduvYEL83R_U4JriQ"
@@ -25,6 +30,16 @@ check_interval_seconds: 900
 """
 
 
+def many_channels(count: int, interval: int) -> str:
+    lines = ["channels:"]
+    for i in range(count):
+        lines.append(f"  - name: 채널{i}")
+        lines.append(f"    channel_id: UC{str(i).zfill(22)}")
+        lines.append(f"    playlist_id: PL{str(i).zfill(20)}")
+    lines.append(f"check_interval_seconds: {interval}")
+    return "\n".join(lines) + "\n"
+
+
 class ConfigTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -40,6 +55,28 @@ class ConfigTest(unittest.TestCase):
 
     def load(self, text, env=None):
         return load_config(self.write(text), env=env or {})
+
+    def test_주기가_너무_짧으면_조회_예산을_넘는다고_거절한다(self):
+        # 채널 10개를 1분마다 보면 조회에만 하루 14,400단위다. 하루 치가 10,000이라
+        # 그 설정으로는 영상을 한 개도 못 넣는다. 돌기 전에 거절한다.
+        with self.assertRaises(ConfigError) as caught:
+            self.load(many_channels(10, 60))
+        message = str(caught.exception)
+        self.assertIn("조회", message)
+        self.assertIn("check_interval_seconds", message)
+
+    def test_예산_안에_드는_주기는_통과한다(self):
+        config = self.load(many_channels(10, 3600))
+        self.assertEqual(len(config.channels), 10)
+
+    def test_하루에_쓰는_조회량을_계산한다(self):
+        # 채널 20개를 한 시간마다 = 하루 24회차 × 20 = 480단위.
+        self.assertEqual(daily_lookup_units(20, 3600), 480)
+
+    def test_예산에_맞는_가장_짧은_주기를_알려준다(self):
+        needed = min_interval_for_budget(20)
+        self.assertLessEqual(daily_lookup_units(20, needed), 5000)
+        self.assertGreater(daily_lookup_units(20, needed - 1), 5000)
 
     def test_채널마다_재생목록이_따로_붙는다(self):
         config = self.load(GOOD)

@@ -6,18 +6,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from youtube_auto.config import ChannelRule, Config  # noqa: E402
-from youtube_auto.feeds import FeedError, Video  # noqa: E402
+from youtube_auto.errors import QuotaExceeded, TransientError  # noqa: E402
 from youtube_auto.playlist import (  # noqa: E402
     ADDED,
     DUPLICATE,
     DryRunClient,
     PlaylistNotUsable,
-    QuotaExceeded,
-    TransientError,
     VideoNotAddable,
 )
 from youtube_auto.runner import next_delay, run_once  # noqa: E402
 from youtube_auto.store import ReadOnlyStore, Store  # noqa: E402
+from youtube_auto.uploads import (  # noqa: E402
+    LookupTransientError,
+    UploadsNotAccessible,
+    Video,
+)
 
 CH_A = "UC_x5XG1OV2P6uZZ5FSM9Ttw"
 CH_B = "UCBJycsmduvYEL83R_U4JriQ"
@@ -56,12 +59,16 @@ def video(video_id, channel_id, title=None):
 
 
 def make_fetch(mapping):
+    """채널마다 미리 정해 둔 답(영상 목록 또는 예외)을 주고 호출을 받아 적는다."""
+
     def fetch(channel_id, timeout=20):
+        fetch.calls.append(channel_id)
         result = mapping[channel_id]
         if isinstance(result, Exception):
             raise result
         return result
 
+    fetch.calls = []
     return fetch
 
 
@@ -78,6 +85,22 @@ class RecordingClient:
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
+
+
+class FlakyConn:
+    """특정 문장에서만 터지는 연결. 영상은 기록됐는데 '본 채널' 표시 직전에 끊긴 상황을 만든다."""
+
+    def __init__(self, conn, fail_on):
+        self._conn = conn
+        self._fail_on = fail_on
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def execute(self, sql, *args, **kwargs):
+        if self._fail_on in sql:
+            raise RuntimeError("기록 중 끊김")
+        return self._conn.execute(sql, *args, **kwargs)
 
 
 class RunOnceTest(unittest.TestCase):
@@ -134,6 +157,40 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(stats.seeded, 2)
         self.assertTrue(self.store.is_added("a1", PL_A))
 
+    def test_처음_보는_채널은_과거_영상_오십_개가_와도_하나도_안_넣는다(self):
+        # 조회 통로를 갈아끼우면 한 번에 오는 목록이 달라질 수 있다. 처음 보는 채널에
+        # 과거 영상이 쏟아져도 재생목록에는 한 개도 안 들어가야 한다.
+        old = [video(f"old{i}", CH_A) for i in range(50)]
+        config = make_config(seed_on_first_run=True)
+        client = RecordingClient()
+        stats = run_once(config, self.store, client,
+                         fetch=make_fetch({CH_A: old, CH_B: []}))
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(stats.seeded, 50)
+        self.assertEqual(stats.added, 0)
+
+        # 다음 회차에 같은 목록이 또 와도 마찬가지다 — 전부 기록돼 있다.
+        run_once(config, self.store, client, fetch=make_fetch({CH_A: old, CH_B: []}))
+        self.assertEqual(client.calls, [])
+
+    def test_첫_회차_기록이_끊기면_본_채널로_남지_않는다(self):
+        # 기록만 끊기고 '본 채널' 표시가 남으면, 다음 회차가 그 과거 영상들을 새 영상으로
+        # 보고 재생목록에 쏟는다. 둘은 한 트랜잭션이라 같이 되돌아가야 한다.
+        config = make_config(seed_on_first_run=True)
+        fetch = make_fetch({CH_A: [video("a1", CH_A), video("a2", CH_A)], CH_B: []})
+
+        real_conn = self.store.conn
+        self.store.conn = FlakyConn(real_conn, "seen_channels")
+        try:
+            with self.assertRaises(RuntimeError):
+                run_once(config, self.store, RecordingClient(), fetch=fetch)
+        finally:
+            self.store.conn = real_conn
+
+        self.assertFalse(self.store.seen_channel(CH_A))
+        self.assertFalse(self.store.is_added("a1", PL_A))
+
     def test_기록만_한_뒤_회차부터는_새_영상을_넣는다(self):
         config = make_config(seed_on_first_run=True)
         client = RecordingClient()
@@ -165,14 +222,65 @@ class RunOnceTest(unittest.TestCase):
 
         self.assertEqual([c[0] for c in client.calls], ["a0", "a1", "a2"])
 
-    def test_피드_오류는_그_채널만_건너뛴다(self):
-        fetch = make_fetch({CH_A: FeedError("못 읽음"), CH_B: [video("b1", CH_B)]})
+    def test_일시적_조회_오류는_그_채널만_건너뛴다(self):
+        fetch = make_fetch({CH_A: LookupTransientError("못 읽음"), CH_B: [video("b1", CH_B)]})
         client = RecordingClient()
         stats = run_once(make_config(), self.store, client, fetch=fetch)
 
         self.assertEqual(client.calls, [("b1", PL_B)])
-        self.assertEqual(stats.feed_errors, 1)
+        self.assertEqual(stats.lookup_errors, 1)
+        self.assertEqual(stats.lookup_ok, 1)
         self.assertEqual(stats.added, 1)
+
+    def test_업로드_목록_접근_오류도_그_채널만_건너뛴다(self):
+        fetch = make_fetch({CH_A: UploadsNotAccessible("없는 채널"), CH_B: [video("b1", CH_B)]})
+        client = RecordingClient()
+        stats = run_once(make_config(), self.store, client, fetch=fetch)
+
+        self.assertEqual(client.calls, [("b1", PL_B)])
+        self.assertEqual(stats.lookup_errors, 1)
+
+    def test_조회_실패는_연속_횟수로_쌓인다(self):
+        config = make_config()
+        fetch = make_fetch({CH_A: LookupTransientError("못 읽음"), CH_B: []})
+        run_once(config, self.store, RecordingClient(), fetch=fetch)
+        run_once(config, self.store, RecordingClient(), fetch=fetch)
+
+        last_ok, _, _, fails = self.store.health(CH_A)
+        self.assertEqual(fails, 2)
+        self.assertIsNone(last_ok)
+
+    def test_다시_읽히면_연속_실패가_0으로_돌아간다(self):
+        config = make_config()
+        run_once(config, self.store, RecordingClient(),
+                 fetch=make_fetch({CH_A: LookupTransientError("못 읽음"), CH_B: []}))
+        run_once(config, self.store, RecordingClient(),
+                 fetch=make_fetch({CH_A: [video("a1", CH_A)], CH_B: []}))
+
+        last_ok, _, _, fails = self.store.health(CH_A)
+        self.assertEqual(fails, 0)
+        self.assertIsNotNone(last_ok)
+
+    def test_조회가_모두_실패한_회차를_알아본다(self):
+        fetch = make_fetch({CH_A: LookupTransientError("못 읽음"), CH_B: LookupTransientError("못 읽음")})
+        stats = run_once(make_config(), self.store, RecordingClient(), fetch=fetch)
+
+        self.assertTrue(stats.all_lookups_failed)
+        self.assertEqual(stats.lookup_errors, 2)
+
+    def test_조회_할당량이_소진되면_다음_채널은_보지도_않는다(self):
+        fetch = make_fetch({CH_A: QuotaExceeded("오늘 치 끝"), CH_B: [video("b1", CH_B)]})
+        client = RecordingClient()
+        stats = run_once(make_config(), self.store, client, fetch=fetch)
+
+        self.assertEqual(fetch.calls, [CH_A])
+        self.assertEqual(client.calls, [])
+        self.assertTrue(stats.quota_exceeded)
+
+    def test_조회_함수를_안_넘기면_거절한다(self):
+        # 조회에도 로그인한 계정이 필요하다. 기본값으로 떨어뜨리지 않는다.
+        with self.assertRaises(TypeError):
+            run_once(make_config(), self.store, RecordingClient())
 
     def test_재생목록_오류는_그_채널만_멈춘다(self):
         fetch = make_fetch(
@@ -240,7 +348,7 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(stats.added, 0)
 
     def test_같은_영상을_두_채널이_올려도_각_재생목록에_하나씩_간다(self):
-        # 재방송·합작처럼 같은 영상 아이디가 두 피드에 나오는 경우다.
+        # 재방송·합작처럼 같은 영상 아이디가 두 채널 목록에 나오는 경우다.
         fetch = make_fetch({CH_A: [video("same1", CH_A)], CH_B: [video("same1", CH_B)]})
         client = RecordingClient()
         run_once(make_config(), self.store, client, fetch=fetch)

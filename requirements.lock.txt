@@ -2,8 +2,6 @@ certifi==2026.10.23
 cffi==2.1.1
 charset-normalizer==3.5.2
 cryptography==50.0.2
-feedparser==6.0.14
-feedparser-sgmllib==2.1.0
 google-api-core==2.43.2
 google-api-python-client==2.201.0
 google-auth==2.62.0

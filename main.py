@@ -2,7 +2,7 @@
 """구독 채널의 새 영상을 채널마다 정해 둔 재생목록에 넣는다.
 
   python main.py --list        설정에 적힌 채널과 재생목록 짝만 확인한다 (연결 없음)
-  python main.py --dry-run     피드를 읽고 무엇을 넣을지만 보여준다 (로그인 없이 된다)
+  python main.py --dry-run     무엇을 넣을지만 보여준다 (조회에 로그인이 필요하고, 넣지도 기록하지도 않는다)
   python main.py --auth-only   브라우저로 한 번 로그인해 token.json 을 만든다
   python main.py --once        한 회차만 돌고 끝낸다
   python main.py               주기마다 계속 돈다 (백그라운드 상주)
@@ -21,11 +21,17 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from youtube_auto.auth import AuthError, build_youtube, load_credentials
-from youtube_auto.config import ConfigError, load_config, resolve_log_file
+from youtube_auto.config import (
+    ConfigError,
+    daily_lookup_units,
+    load_config,
+    resolve_log_file,
+)
 from youtube_auto.playlist import DryRunClient, PlaylistClient
 from youtube_auto.resident import wait_until_ready
 from youtube_auto.runner import run_forever, run_once
 from youtube_auto.store import ReadOnlyStore, Store
+from youtube_auto.uploads import UploadsClient
 
 ROOT = Path(__file__).resolve().parent
 LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s | %(message)s"
@@ -68,7 +74,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--config", default=None, help="설정 파일 경로 (기본: config.yaml)")
     parser.add_argument("--once", action="store_true", help="한 회차만 돌고 끝낸다")
     parser.add_argument(
-        "--dry-run", action="store_true", help="실제로 넣지 않고 무엇을 넣을지만 보여준다"
+        "--dry-run",
+        action="store_true",
+        help="실제로 넣지 않고 무엇을 넣을지만 보여준다 (조회에는 로그인이 필요하다)",
     )
     parser.add_argument(
         "--auth-only", action="store_true", help="브라우저로 로그인만 하고 끝낸다"
@@ -88,7 +96,8 @@ def print_rules(config) -> None:
     print(
         f"\n확인 주기 {config.check_interval_seconds}초 · "
         f"회차당 채널마다 최대 {config.max_videos_per_channel_per_run}개 · "
-        f"첫 회차 기록만 하기 {'켬' if config.seed_on_first_run else '끔'}"
+        f"첫 회차 기록만 하기 {'켬' if config.seed_on_first_run else '끔'} · "
+        f"조회에 하루 {daily_lookup_units(len(config.channels), config.check_interval_seconds)}단위"
     )
 
 
@@ -115,12 +124,19 @@ def run_resident(config_path, verbose: bool) -> int:
     config, credentials = ready
 
     store = Store(config.db_file)
+    youtube = build_youtube(credentials)
     try:
         log.info(
-            "채널 %d개를 %d초마다 본다. 기록 파일 %s",
-            len(config.channels), config.check_interval_seconds, config.db_file,
+            "채널 %d개를 %d초마다 본다 (조회에 하루 %d단위). 기록 파일 %s",
+            len(config.channels),
+            config.check_interval_seconds,
+            daily_lookup_units(len(config.channels), config.check_interval_seconds),
+            config.db_file,
         )
-        run_forever(config, store, PlaylistClient(build_youtube(credentials)), stop=stop)
+        run_forever(
+            config, store, PlaylistClient(youtube),
+            fetch=UploadsClient(youtube).fetch, stop=stop,
+        )
         log.info("멈췄다.")
         return 0
     finally:
@@ -157,28 +173,32 @@ def main(argv=None) -> int:
         log.info("로그인이 끝났다. 이제 백그라운드로 돌려도 된다.")
         return 0
 
+    try:
+        # 새 영상을 보는 것도 공개 API 라 시험 실행에도 로그인이 필요하다. 터미널에서
+        # 직접 돌릴 때만 브라우저를 연다 — 상주로 돌 때는 열지 않는다.
+        credentials = load_credentials(
+            config.client_secret_file,
+            config.token_file,
+            allow_browser=sys.stdin.isatty(),
+        )
+    except AuthError as exc:
+        log.error("%s", exc)
+        return 1
+
+    youtube = build_youtube(credentials)
+    fetch = UploadsClient(youtube).fetch
+
     if args.dry_run:
-        # 넣지 않으니 로그인도 필요 없다. 설정과 피드만 확인하는 자리다.
         client = DryRunClient()
-        log.info("시험 실행 — 실제로 넣지 않는다.")
+        log.info("시험 실행 — 조회만 하고 넣지도 기록하지도 않는다.")
     else:
-        try:
-            # 터미널에서 직접 돌릴 때만 브라우저를 연다. 상주로 돌 때는 열지 않는다.
-            credentials = load_credentials(
-                config.client_secret_file,
-                config.token_file,
-                allow_browser=sys.stdin.isatty(),
-            )
-        except AuthError as exc:
-            log.error("%s", exc)
-            return 1
-        client = PlaylistClient(build_youtube(credentials))
+        client = PlaylistClient(youtube)
 
     # 시험 실행은 기록을 남기지 않는다 — 남기면 그 채널이 '이미 본 채널' 이 돼서
     # 진짜로 돌릴 때 첫 회차가 통째로 건너뛰어진다.
     store = ReadOnlyStore(Store(config.db_file)) if args.dry_run else Store(config.db_file)
     try:
-        stats = run_once(config, store, client)
+        stats = run_once(config, store, client, fetch=fetch)
         log.info("회차 끝 — %s", stats.summary())
         return 0
     finally:

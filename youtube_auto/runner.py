@@ -1,10 +1,14 @@
-"""한 회차를 돈다 — 채널마다 피드를 보고, 새 영상을 그 채널의 재생목록에 넣는다.
+"""한 회차를 돈다 — 채널마다 올라온 영상을 보고, 새 영상을 그 채널의 재생목록에 넣는다.
 
 채널과 재생목록의 짝은 설정이 정한다. 이 파일은 그 짝을 바꾸지 않는다 — 어느 채널의
 영상이든 config 에 적힌 그 채널의 재생목록으로만 간다.
 
 한 채널에서 터진 문제가 다음 채널을 막지 않는다. 예외는 할당량 소진 하나다 — 그건
-계정 단위라 다음 채널도 똑같이 막히므로 회차를 그 자리에서 끝낸다.
+계정 단위라 다음 채널도 똑같이 막히므로 회차를 그 자리에서 끝낸다. 조회도 넣기도 같은
+할당량을 쓰므로 어느 쪽에서 소진이 나든 똑같이 멈춘다.
+
+새 영상 판정은 공개 시각이 아니라 "기록에 있나" 하나로 돈다. 그래서 한 번에 받는 개수를
+늘리면 과거 영상이 새 영상으로 보인다 — 그 판정을 먼저 고치기 전에는 열다섯을 유지한다.
 """
 from __future__ import annotations
 
@@ -13,16 +17,9 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from .feeds import FeedError, fetch_videos
-from .playlist import (
-    ADDED,
-    DRY_RUN,
-    DUPLICATE,
-    PlaylistNotUsable,
-    QuotaExceeded,
-    TransientError,
-    VideoNotAddable,
-)
+from .errors import QuotaExceeded, TransientError
+from .playlist import ADDED, DRY_RUN, DUPLICATE, PlaylistNotUsable, VideoNotAddable
+from .uploads import ChannelLookupError, UploadsNotAccessible
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +27,8 @@ log = logging.getLogger(__name__)
 @dataclass
 class RunStats:
     channels: int = 0
-    feed_errors: int = 0
+    lookup_errors: int = 0
+    lookup_ok: int = 0
     new_videos: int = 0
     added: int = 0
     duplicates: int = 0
@@ -39,51 +37,69 @@ class RunStats:
     playlist_errors: int = 0
     quota_exceeded: bool = False
 
+    @property
+    def all_lookups_failed(self) -> bool:
+        return self.channels > 0 and self.lookup_ok == 0
+
     def summary(self) -> str:
         return (
             f"채널 {self.channels}개 · 새 영상 {self.new_videos}개 · 넣음 {self.added}개 · "
             f"이미 있음 {self.duplicates}개 · 첫 회차 기록만 {self.seeded}개 · "
-            f"건너뜀 {self.skipped_videos}개 · 피드 오류 {self.feed_errors}개 · "
+            f"건너뜀 {self.skipped_videos}개 · 조회 오류 {self.lookup_errors}개 · "
             f"재생목록 오류 {self.playlist_errors}개"
             + (" · 할당량 소진" if self.quota_exceeded else "")
         )
 
 
 def run_once(config, store, client, fetch: Optional[Callable] = None) -> RunStats:
-    fetch = fetch or fetch_videos
+    """fetch 는 채널 아이디를 받아 영상 목록을 돌려주는 함수다 (UploadsClient.fetch)."""
+    if fetch is None:
+        raise TypeError("fetch 를 넘겨야 한다 — 조회에도 로그인한 계정이 필요하다.")
     stats = RunStats()
 
     for rule in config.channels:
         stats.channels += 1
         try:
             videos = fetch(rule.channel_id, timeout=config.request_timeout_seconds)
-        except FeedError as exc:
-            log.warning("%s: 피드를 못 읽어 이번 회차는 건너뛴다 — %s", rule.name, exc)
-            stats.feed_errors += 1
+        except QuotaExceeded as exc:
+            # 조회와 넣기가 같은 할당량을 쓴다. 다음 채널도 똑같이 막히므로 여기서 끝낸다.
+            log.error("할당량 소진이라 이번 회차를 여기서 끝낸다 — %s", exc)
+            stats.quota_exceeded = True
+            return stats
+        except ChannelLookupError as exc:
+            fails = store.record_lookup_failure(rule.channel_id, str(exc))
+            stats.lookup_errors += 1
+            if isinstance(exc, UploadsNotAccessible):
+                # 설정이나 권한 문제라 다음 회차에도 같다. 사람이 고쳐야 한다.
+                log.error("%s: %s (연속 %d회)", rule.name, exc, fails)
+            else:
+                log.warning("%s: %s 다음 회차에 다시 본다. (연속 %d회)", rule.name, exc, fails)
             continue
+
+        store.record_lookup_ok(rule.channel_id)
+        stats.lookup_ok += 1
 
         first_time = not store.seen_channel(rule.channel_id)
-        store.mark_channel_seen(rule.channel_id)
-
         fresh = [v for v in videos if not store.is_added(v.video_id, rule.playlist_id)]
-        if not fresh:
-            log.debug("%s: 새 영상 없음", rule.name)
-            continue
 
         if first_time and config.seed_on_first_run:
-            # 피드에는 최근 열다섯 개가 들어 있다. 처음 보는 채널의 그것을 그대로 넣으면
+            # 조회에는 최근 열다섯 개가 들어 있다. 처음 보는 채널의 그것을 그대로 넣으면
             # 재생목록이 과거 영상으로 덮인다. 기록만 하고 다음 회차부터 진짜 새것을 넣는다.
-            for video in fresh:
-                store.mark_added(
-                    video.video_id, rule.playlist_id, rule.channel_id,
-                    title=video.title, published_at=video.published, source="seed",
-                )
+            # 기록과 '본 채널' 표시는 한 트랜잭션이다 — 표시만 남으면 다음 회차가 이
+            # 영상들을 새 영상으로 보고 쏟아 넣는다.
+            store.seed_channel(rule.channel_id, rule.playlist_id, fresh)
             stats.seeded += len(fresh)
             log.info(
                 "%s: 처음 보는 채널이라 지금 올라와 있는 %d개는 넣지 않고 넘긴다. "
                 "다음 회차부터 새로 올라오는 영상을 넣는다.",
                 rule.name, len(fresh),
             )
+            continue
+
+        store.mark_channel_seen(rule.channel_id)
+
+        if not fresh:
+            log.debug("%s: 새 영상 없음", rule.name)
             continue
 
         stats.new_videos += len(fresh)
@@ -108,7 +124,7 @@ def run_once(config, store, client, fetch: Optional[Callable] = None) -> RunStat
             except VideoNotAddable as exc:
                 log.warning("%s: %s", rule.name, exc)
                 stats.skipped_videos += 1
-                # 다시 걸어도 같은 답이 온다. 기록해 두지 않으면 피드에 남아 있는 동안
+                # 다시 걸어도 같은 답이 온다. 기록해 두지 않으면 목록에 남아 있는 동안
                 # 회차마다 할당량을 쓴다.
                 store.mark_added(
                     video.video_id, rule.playlist_id, rule.channel_id,
@@ -152,12 +168,23 @@ def next_delay(config, stats: RunStats) -> int:
 
 
 def run_forever(config, store, client, fetch: Optional[Callable] = None, stop=None) -> None:
+    blackout = False  # 직전 회차에 어느 채널도 못 읽었나
     while True:
         if stop is not None and stop.is_set():
             break
         try:
             stats = run_once(config, store, client, fetch=fetch)
             log.info("회차 끝 — %s", stats.summary())
+            if stats.all_lookups_failed and not stats.quota_exceeded:
+                if not blackout:
+                    log.error(
+                        "채널 %d개를 하나도 못 읽었다. 로그인이 끊겼거나 유튜브 쪽이 막힌 것이다.",
+                        stats.channels,
+                    )
+                blackout = True
+            elif blackout and stats.lookup_ok > 0:
+                log.info("조회가 다시 된다 — 이번 회차에 채널 %d개를 읽었다.", stats.lookup_ok)
+                blackout = False
             delay = next_delay(config, stats)
         except Exception:
             # 한 회차가 통째로 터져도 데몬은 선다. 다음 회차에 다시 본다.

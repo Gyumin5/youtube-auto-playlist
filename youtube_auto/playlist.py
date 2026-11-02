@@ -12,12 +12,20 @@
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Callable
 
 from googleapiclient.errors import HttpError
+
+from .errors import (
+    QUOTA_REASONS,
+    RETRY_REASONS,
+    QuotaExceeded,
+    TransientError,
+    error_reason,
+    status_of,
+)
 
 log = logging.getLogger(__name__)
 
@@ -25,8 +33,6 @@ ADDED = "added"
 DUPLICATE = "duplicate"
 DRY_RUN = "dry-run"
 
-QUOTA_REASONS = {"quotaExceeded", "dailyLimitExceeded"}
-RETRY_REASONS = {"rateLimitExceeded", "userRateLimitExceeded", "backendError", "internalError"}
 DUPLICATE_REASONS = {"videoAlreadyInPlaylist"}
 PLAYLIST_REASONS = {
     "playlistNotFound",
@@ -40,41 +46,12 @@ PLAYLIST_REASONS = {
 VIDEO_REASONS = {"videoNotFound", "invalidVideoId", "failedPrecondition", "notFound"}
 
 
-class QuotaExceeded(Exception):
-    """오늘 치 할당량을 다 썼다. 태평양 시간 자정에 초기화된다."""
-
-
 class PlaylistNotUsable(Exception):
     """그 재생목록에는 넣을 수 없다 — 설정이나 권한 문제라 다시 걸어도 같다."""
 
 
 class VideoNotAddable(Exception):
     """그 영상은 넣을 수 없다 — 비공개이거나 지워졌다."""
-
-
-class TransientError(Exception):
-    """몇 번 다시 걸어도 안 됐다."""
-
-
-def error_reason(error: HttpError) -> str:
-    """구글 오류 본문에서 reason 을 꺼낸다. 상태 코드만으로는 갈래를 못 가른다."""
-    try:
-        content = error.content
-        if isinstance(content, bytes):
-            content = content.decode("utf-8", "replace")
-        payload = json.loads(content)
-    except Exception:  # 본문이 JSON 이 아닐 수도 있다
-        return ""
-    block = payload.get("error", {})
-    errors = block.get("errors") or []
-    if errors and isinstance(errors[0], dict):
-        return errors[0].get("reason", "") or ""
-    return block.get("status", "") or ""
-
-
-def _status(error: HttpError) -> int:
-    resp = getattr(error, "resp", None)
-    return int(getattr(resp, "status", 0) or 0)
 
 
 class PlaylistClient:
@@ -99,7 +76,7 @@ class PlaylistClient:
                 return ADDED
             except HttpError as exc:
                 reason = error_reason(exc)
-                status = _status(exc)
+                status = status_of(exc)
 
                 if reason in QUOTA_REASONS:
                     raise QuotaExceeded(

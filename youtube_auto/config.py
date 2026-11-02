@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +15,7 @@ from typing import Dict, Optional, Tuple
 import yaml
 
 # 채널 아이디는 UC 로 시작하는 24자다. 주소창에 보이는 @핸들이나 사용자 이름은 다른 값이라
-# 그대로 넣으면 피드가 404 를 준다.
+# 그대로 넣으면 조회가 404 를 준다.
 CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
 PLAYLIST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{12,64}$")
 
@@ -26,6 +27,15 @@ UNWRITABLE_PLAYLISTS = {
 }
 
 MIN_INTERVAL_SECONDS = 60
+
+# 공개 API 가 하루에 주는 양. 조회(playlistItems.list)는 한 번에 1단위, 넣기
+# (playlistItems.insert)는 50단위다. 조회가 하루 치의 절반을 넘으면 거절한다 — 나머지는
+# 넣기와 재시도 몫이고, 조회로 다 쓰면 정작 새 영상을 못 넣는다.
+DAILY_QUOTA_UNITS = 10_000
+LOOKUP_UNITS_PER_CALL = 1
+INSERT_UNITS_PER_CALL = 50
+LOOKUP_BUDGET_FRACTION = 0.5
+SECONDS_PER_DAY = 86_400
 
 DEFAULTS = {
     "check_interval_seconds": 3600,
@@ -54,6 +64,24 @@ class ChannelRule:
     name: str
     channel_id: str
     playlist_id: str
+
+
+def daily_lookup_units(channel_count: int, interval_seconds: int) -> int:
+    """하루에 조회로만 쓰는 할당량. 주기가 짧을수록 커진다."""
+    runs_per_day = math.ceil(SECONDS_PER_DAY / interval_seconds)
+    return runs_per_day * channel_count * LOOKUP_UNITS_PER_CALL
+
+
+def min_interval_for_budget(channel_count: int) -> int:
+    """조회 예산 안에 들어오는 가장 짧은 주기(초)."""
+    budget = int(DAILY_QUOTA_UNITS * LOOKUP_BUDGET_FRACTION)
+    runs = budget // max(channel_count * LOOKUP_UNITS_PER_CALL, 1)
+    if runs <= 0:
+        raise ConfigError(
+            f"채널 {channel_count}개는 하루 한 번만 봐도 조회 예산 {budget}단위를 넘는다. "
+            "채널 수를 줄인다."
+        )
+    return math.ceil(SECONDS_PER_DAY / runs)
 
 
 @dataclass(frozen=True)
@@ -194,7 +222,19 @@ def load_config(config_path, env: Optional[Dict[str, str]] = None) -> Config:
     if interval < MIN_INTERVAL_SECONDS:
         raise ConfigError(
             f"check_interval_seconds 는 {MIN_INTERVAL_SECONDS} 이상이어야 한다 (받은 값: {interval}). "
-            "더 자주 봐도 새 영상이 빨리 보이지 않고 피드 쪽에만 부담이 간다."
+            "더 자주 봐도 새 영상이 빨리 보이지 않는다."
+        )
+
+    lookup_units = daily_lookup_units(len(channels), interval)
+    budget = int(DAILY_QUOTA_UNITS * LOOKUP_BUDGET_FRACTION)
+    if lookup_units > budget:
+        needed = min_interval_for_budget(len(channels))
+        raise ConfigError(
+            f"주기 {interval}초로 채널 {len(channels)}개를 보면 조회에만 하루 "
+            f"{lookup_units}단위를 쓴다. 하루 치가 {DAILY_QUOTA_UNITS}단위이고 조회 몫은 "
+            f"{budget}단위까지다 — 나머지는 영상을 넣는 데 쓴다(한 개에 "
+            f"{INSERT_UNITS_PER_CALL}단위). check_interval_seconds 를 {needed} 이상으로 "
+            "올리거나 채널 수를 줄인다."
         )
 
     seed = values["seed_on_first_run"]

@@ -3,7 +3,7 @@
 client_secret.json
 client_secret*.json
 token.json
-token.json.invalid
+token.json.*
 
 # 내 설정과 기록
 config.yaml
