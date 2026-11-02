@@ -73,7 +73,7 @@ channels:
   - name: KBS 추적60분
     channel_id: UCy-6oZwPwrR_W-zYnqLD8dg
     playlist_id: PLHPYrlCEsHhA
-    min_duration_minutes: 40
+    min_duration_minutes: 35
 ```
 
 길이는 영상 목록에 안 들어 있어서 따로 묻는다 — 적은 채널마다 회차에 조회가 1단위씩 더
