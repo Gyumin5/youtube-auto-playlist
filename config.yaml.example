@@ -22,7 +22,7 @@ channels:
 
 # 피드를 얼마나 자주 보나 (초). 최소 60.
 # 유튜브 피드 자체가 몇 분 늦게 갱신되므로 더 짧게 잡아도 영상이 더 빨리 보이지 않는다.
-check_interval_seconds: 1800
+check_interval_seconds: 3600
 
 # 하루 할당량을 다 쓴 회차 뒤에는 이만큼 쉰다 (초). 할당량은 태평양 시간 자정에 초기화된다.
 quota_backoff_seconds: 3600

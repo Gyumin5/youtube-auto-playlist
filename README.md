@@ -7,6 +7,18 @@
 새 영상을 찾는 데는 채널 RSS 피드를 쓰고, 넣을 때만 공식 API(playlistItems.insert)를
 부른다. 피드는 할당량을 쓰지 않아서, 하루 치 할당량이 오로지 "넣는" 쪽에만 쓰인다.
 
+## 지금 상태
+
+사용자 서비스로 이미 상주하고 있다.
+
+```
+systemctl --user status youtube-auto-playlist
+journalctl --user -u youtube-auto-playlist -f
+```
+
+설정이나 로그인이 아직 없으면 죽지 않고 5분마다 다시 본다. 아래 셋을 채우면 그 자리에서
+알아서 돌기 시작한다 — 서비스를 다시 켤 필요가 없다.
+
 ---
 
 ## 1. 구글 클라우드 콘솔에서 자격 받기
@@ -27,21 +39,10 @@
    - 애플리케이션 유형: **데스크톱 앱**
 5. 만들어진 자격의 JSON 을 내려받아 이 폴더에 `client_secret.json` 으로 둔다.
 
-## 2. 설치
-
-```
-cd ~/youtube-auto-playlist
-python3 -m venv .venv            # python3-venv 가 없으면: uv venv --python 3.12 .venv
-.venv/bin/python -m pip install -r requirements.txt
-```
-
-판본까지 똑같이 맞추고 싶으면 `requirements.lock.txt` 를 쓴다.
-
-## 3. 설정
+## 2. 볼 채널과 넣을 재생목록 적기
 
 ```
 cp config.yaml.example config.yaml
-cp .env.example .env
 ```
 
 `config.yaml` 에 채널과 재생목록을 짝지어 적는다.
@@ -62,29 +63,29 @@ channels:
 채널에 `playlist_id` 를 안 적으면 시작하지 않는다. 기본 재생목록으로 떨어뜨리면 엉뚱한
 곳에 쌓이고, 그걸 나중에 손으로 걷어내야 한다.
 
-`.env` 에는 파일 경로만 들어간다. 그대로 둬도 된다.
+기본 확인 주기는 한 시간이다. `check_interval_seconds` 로 바꾼다(최소 60초).
 
-## 4. 로그인
+## 3. 한 번 로그인
 
 ```
 .venv/bin/python main.py --auth-only
 ```
 
 브라우저가 열리고, 허용하면 `token.json` 이 생긴다. 그다음부터는 이 파일을 재사용하고
-만료된 접근 토큰은 알아서 갱신한다.
+만료된 접근 토큰은 알아서 갱신한다. 상주로 도는 쪽은 브라우저를 열지 않으므로 이 한 번은
+화면이 있는 자리에서 해야 한다.
 
-## 5. 실행
+---
+
+## 손으로 돌려 보기
 
 ```
 .venv/bin/python main.py --list      # 채널과 재생목록 짝만 확인한다 (연결 없음)
 .venv/bin/python main.py --dry-run   # 피드를 읽고 무엇을 넣을지만 보여준다 (로그인 없이 된다)
 .venv/bin/python main.py --once      # 한 회차만 돌고 끝낸다
-.venv/bin/python main.py             # 주기마다 계속 돈다
 ```
 
 시험 실행은 기록을 남기지 않는다. 몇 번을 돌려도 그 뒤의 진짜 첫 회차가 그대로 살아 있다.
-
-상주로 돌리려면 `systemd/youtube-auto-playlist.service.example` 을 보고 사용자 서비스로 올린다.
 
 ### 첫 회차는 넣지 않는다
 
@@ -119,15 +120,29 @@ channels:
 .venv/bin/python -m unittest discover -s tests -p "test_*.py"
 ```
 
-78개가 돈다. 연결도 로그인도 하지 않는다 — 피드는 고정 본문으로, API 는 가짜 객체로 재는다.
+87개가 돈다. 연결도 로그인도 하지 않는다 — 피드는 고정 본문으로, API 는 가짜 객체로 잰다.
 
 ## 막히는 자리
 
 | 증상 | 까닭과 할 일 |
 |---|---|
+| 로그에 "설정을 기다린다" 가 한 줄 있고 조용하다 | 아직 `config.yaml` 이 없다. 2번을 채우면 5분 안에 집어든다. |
+| 로그에 "로그인을 기다린다" | 자격 파일이나 `token.json` 이 없다. 1번·3번을 한다. |
 | 시작할 때 "채널 아이디 모양이 아니다" | `@핸들` 을 적었다. `UC` 로 시작하는 값을 찾아 넣는다. |
 | `playlistNotFound` / `playlistItemsNotAccessible` | 재생목록 아이디가 틀렸거나, 로그인한 계정의 재생목록이 아니다. |
 | 매주 다시 로그인하라고 한다 | 동의 화면이 테스트 모드다. 1번의 "앱 게시" 를 한다. |
 | 영상이 안 들어오는데 오류도 없다 | 처음 보는 채널의 첫 회차다. 다음 회차부터 들어간다. |
 | `quotaExceeded` | 하루 200개를 넘겼다. 태평양 시간 자정까지 기다린다. |
 | 피드 404 | 그런 채널이 없다. 채널 아이디를 다시 본다. |
+
+## 설치 (다른 자리에 새로 올릴 때)
+
+```
+python3 -m venv .venv            # python3-venv 가 없으면: uv venv --python 3.12 .venv
+.venv/bin/python -m pip install -r requirements.txt
+cp systemd/youtube-auto-playlist.service.example ~/.config/systemd/user/youtube-auto-playlist.service
+systemctl --user daemon-reload
+systemctl --user enable --now youtube-auto-playlist.service
+```
+
+판본까지 똑같이 맞추고 싶으면 `requirements.lock.txt` 를 쓴다.

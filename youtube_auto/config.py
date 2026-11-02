@@ -28,7 +28,7 @@ UNWRITABLE_PLAYLISTS = {
 MIN_INTERVAL_SECONDS = 60
 
 DEFAULTS = {
-    "check_interval_seconds": 1800,
+    "check_interval_seconds": 3600,
     "quota_backoff_seconds": 3600,
     "seed_on_first_run": True,
     "max_videos_per_channel_per_run": 10,
@@ -150,6 +150,17 @@ def _parse_channels(raw) -> Tuple[ChannelRule, ...]:
 def _resolve(root: Path, value: str) -> Path:
     path = Path(value).expanduser()
     return path if path.is_absolute() else (root / path)
+
+
+def resolve_log_file(config_path, env: Optional[Dict[str, str]] = None) -> Path:
+    """설정 파일을 아직 못 읽는 동안에도 기록은 같은 자리에 남긴다.
+
+    로그 경로는 config.yaml 안이 아니라 환경 변수와 기본값에서 오므로, 설정이 없거나
+    틀린 상태에서도 정할 수 있다. 상주로 돌 때 준비를 기다리는 동안 쓴다.
+    """
+    env = dict(env or {})
+    root = Path(config_path).expanduser().resolve().parent
+    return _resolve(root, env.get("YTAP_LOG_FILE") or ENV_DEFAULTS["YTAP_LOG_FILE"])
 
 
 def load_config(config_path, env: Optional[Dict[str, str]] = None) -> Config:

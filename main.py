@@ -21,8 +21,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from youtube_auto.auth import AuthError, build_youtube, load_credentials
-from youtube_auto.config import ConfigError, load_config
+from youtube_auto.config import ConfigError, load_config, resolve_log_file
 from youtube_auto.playlist import DryRunClient, PlaylistClient
+from youtube_auto.resident import wait_until_ready
 from youtube_auto.runner import run_forever, run_once
 from youtube_auto.store import ReadOnlyStore, Store
 
@@ -91,11 +92,50 @@ def print_rules(config) -> None:
     )
 
 
+def install_stop_signals(stop: threading.Event) -> None:
+    def handle_signal(signum, _frame):
+        log.info("신호 %s 를 받아 멈춘다.", signum)
+        stop.set()
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+
+def run_resident(config_path, verbose: bool) -> int:
+    """상주로 돈다. 설정이나 로그인이 아직 없으면 죽지 않고 기다린다."""
+    setup_logging(resolve_log_file(config_path, dict(os.environ)), verbose)
+
+    stop = threading.Event()
+    install_stop_signals(stop)
+
+    ready = wait_until_ready(config_path, stop)
+    if ready is None:
+        log.info("준비를 기다리다 멈췄다.")
+        return 0
+    config, credentials = ready
+
+    store = Store(config.db_file)
+    try:
+        log.info(
+            "채널 %d개를 %d초마다 본다. 기록 파일 %s",
+            len(config.channels), config.check_interval_seconds, config.db_file,
+        )
+        run_forever(config, store, PlaylistClient(build_youtube(credentials)), stop=stop)
+        log.info("멈췄다.")
+        return 0
+    finally:
+        store.close()
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     load_dotenv(ROOT / ".env")
 
     config_path = args.config or os.environ.get("YTAP_CONFIG_FILE") or (ROOT / "config.yaml")
+
+    if not (args.once or args.dry_run or args.auth_only or args.list):
+        return run_resident(config_path, args.verbose)
+
     try:
         config = load_config(config_path, env=dict(os.environ))
     except ConfigError as exc:
@@ -138,26 +178,8 @@ def main(argv=None) -> int:
     # 진짜로 돌릴 때 첫 회차가 통째로 건너뛰어진다.
     store = ReadOnlyStore(Store(config.db_file)) if args.dry_run else Store(config.db_file)
     try:
-        if args.once or args.dry_run:
-            stats = run_once(config, store, client)
-            log.info("회차 끝 — %s", stats.summary())
-            return 0
-
-        stop = threading.Event()
-
-        def handle_signal(signum, _frame):
-            log.info("신호 %s 를 받아 이번 대기 뒤에 멈춘다.", signum)
-            stop.set()
-
-        signal.signal(signal.SIGINT, handle_signal)
-        signal.signal(signal.SIGTERM, handle_signal)
-
-        log.info(
-            "채널 %d개를 %d초마다 본다. 기록 파일 %s",
-            len(config.channels), config.check_interval_seconds, config.db_file,
-        )
-        run_forever(config, store, client, stop=stop)
-        log.info("멈췄다.")
+        stats = run_once(config, store, client)
+        log.info("회차 끝 — %s", stats.summary())
         return 0
     finally:
         store.close()
