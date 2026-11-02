@@ -33,6 +33,8 @@ MIN_INTERVAL_SECONDS = 60
 # 넣기와 재시도 몫이고, 조회로 다 쓰면 정작 새 영상을 못 넣는다.
 DAILY_QUOTA_UNITS = 10_000
 LOOKUP_UNITS_PER_CALL = 1
+# 채널 하나에 드는 조회 호출 수: 올라온 목록 받기 + 그 영상들의 길이·라이브 여부 묻기.
+CALLS_PER_CHANNEL = 2
 INSERT_UNITS_PER_CALL = 50
 LOOKUP_BUDGET_FRACTION = 0.5
 SECONDS_PER_DAY = 86_400
@@ -61,9 +63,9 @@ class ConfigError(Exception):
 class ChannelRule:
     """채널 하나와 그 채널의 새 영상을 넣을 재생목록 하나.
 
-    min_duration_seconds 가 0 이 아니면 그보다 짧은 영상은 안 넣는다. 예고·쇼츠·하이라이트가
-    본편과 같은 채널에서 나오는 경우를 위한 칸이다. 길이는 영상 목록에 없어서 따로 물어야
-    하므로, 이 칸을 쓴 채널마다 회차당 조회가 1단위씩 더 든다.
+    min_duration_seconds 가 0 이 아니면 그보다 짧은 영상은 안 넣는다. 예고·하이라이트가
+    본편과 같은 채널에서 나오는 경우를 위한 칸이다. 쇼츠와 라이브는 이 칸과 상관없이 전
+    채널에서 거른다.
     """
 
     name: str
@@ -72,20 +74,20 @@ class ChannelRule:
     min_duration_seconds: int = 0
 
 
-def daily_lookup_units(channel_count: int, interval_seconds: int, duration_checks: int = 0) -> int:
+def daily_lookup_units(channel_count: int, interval_seconds: int) -> int:
     """하루에 조회로만 쓰는 할당량. 주기가 짧을수록 커진다.
 
-    duration_checks 는 최소 길이를 적은 채널 수다. 길이는 영상 목록에 없어서 회차마다
-    그 채널 수만큼 호출이 더 든다.
+    채널 하나에 호출이 둘 든다 — 올라온 목록 받기와 그 영상들의 길이·라이브 여부 묻기다.
+    둘째 호출은 쇼츠와 라이브를 전 채널에서 거르기 때문에 늘 든다.
     """
     runs_per_day = math.ceil(SECONDS_PER_DAY / interval_seconds)
-    return runs_per_day * (channel_count + duration_checks) * LOOKUP_UNITS_PER_CALL
+    return runs_per_day * channel_count * CALLS_PER_CHANNEL * LOOKUP_UNITS_PER_CALL
 
 
-def min_interval_for_budget(channel_count: int, duration_checks: int = 0) -> int:
+def min_interval_for_budget(channel_count: int) -> int:
     """조회 예산 안에 들어오는 가장 짧은 주기(초)."""
     budget = int(DAILY_QUOTA_UNITS * LOOKUP_BUDGET_FRACTION)
-    calls_per_run = (channel_count + duration_checks) * LOOKUP_UNITS_PER_CALL
+    calls_per_run = channel_count * CALLS_PER_CHANNEL * LOOKUP_UNITS_PER_CALL
     runs = budget // max(calls_per_run, 1)
     if runs <= 0:
         raise ConfigError(
@@ -109,14 +111,8 @@ class Config:
     log_file: Path
 
     @property
-    def duration_checks(self) -> int:
-        return sum(1 for rule in self.channels if rule.min_duration_seconds)
-
-    @property
     def daily_lookup_units(self) -> int:
-        return daily_lookup_units(
-            len(self.channels), self.check_interval_seconds, self.duration_checks
-        )
+        return daily_lookup_units(len(self.channels), self.check_interval_seconds)
 
     def playlist_for(self, channel_id: str) -> Optional[str]:
         for rule in self.channels:
@@ -265,11 +261,10 @@ def load_config(config_path, env: Optional[Dict[str, str]] = None) -> Config:
             "더 자주 봐도 새 영상이 빨리 보이지 않는다."
         )
 
-    duration_checks = sum(1 for rule in channels if rule.min_duration_seconds)
-    lookup_units = daily_lookup_units(len(channels), interval, duration_checks)
+    lookup_units = daily_lookup_units(len(channels), interval)
     budget = int(DAILY_QUOTA_UNITS * LOOKUP_BUDGET_FRACTION)
     if lookup_units > budget:
-        needed = min_interval_for_budget(len(channels), duration_checks)
+        needed = min_interval_for_budget(len(channels))
         raise ConfigError(
             f"주기 {interval}초로 채널 {len(channels)}개를 보면 조회에만 하루 "
             f"{lookup_units}단위를 쓴다. 하루 치가 {DAILY_QUOTA_UNITS}단위이고 조회 몫은 "

@@ -70,8 +70,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(len(config.channels), 10)
 
     def test_하루에_쓰는_조회량을_계산한다(self):
-        # 채널 20개를 한 시간마다 = 하루 24회차 × 20 = 480단위.
-        self.assertEqual(daily_lookup_units(20, 3600), 480)
+        # 채널 하나에 호출 둘(목록 + 영상 정보). 20개를 한 시간마다 = 24 × 20 × 2 = 960단위.
+        self.assertEqual(daily_lookup_units(20, 3600), 960)
 
     def test_예산에_맞는_가장_짧은_주기를_알려준다(self):
         needed = min_interval_for_budget(20)
@@ -89,7 +89,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.channels[0].min_duration_seconds, 2400)
         self.assertEqual(config.channels[1].min_duration_seconds, 0)
 
-    def test_최소_길이를_적은_채널은_조회량을_하나씩_더_쓴다(self):
+    def test_최소_길이와_상관없이_채널마다_두_단위를_쓴다(self):
+        # 쇼츠·라이브를 전 채널에서 거르므로 영상 정보 조회가 늘 붙는다.
         text = (
             f"channels:\n  - name: 가\n    channel_id: {CHANNEL_A}\n"
             f"    playlist_id: {PLAYLIST_A}\n    min_duration_minutes: 40\n"
@@ -97,9 +98,8 @@ class ConfigTest(unittest.TestCase):
             f"    playlist_id: {PLAYLIST_B}\ncheck_interval_seconds: 3600\n"
         )
         config = self.load(text)
-        # 채널 2개 + 길이 조회 1개 = 회차당 3단위, 하루 24회차.
-        self.assertEqual(config.duration_checks, 1)
-        self.assertEqual(config.daily_lookup_units, 72)
+        # 채널 2개 × 2단위 × 하루 24회차.
+        self.assertEqual(config.daily_lookup_units, 96)
 
     def test_최소_길이가_0이거나_음수면_거절한다(self):
         for bad in ("0", "-5", "사십"):

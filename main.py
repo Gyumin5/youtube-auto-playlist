@@ -137,7 +137,7 @@ def run_resident(config_path, verbose: bool) -> int:
         uploads = UploadsClient(youtube)
         run_forever(
             config, store, PlaylistClient(youtube),
-            fetch=uploads.fetch, durations=uploads.durations, stop=stop,
+            fetch=uploads.fetch, video_meta=uploads.video_meta, stop=stop,
         )
         log.info("멈췄다.")
         return 0
@@ -201,7 +201,7 @@ def main(argv=None) -> int:
     store = ReadOnlyStore(Store(config.db_file)) if args.dry_run else Store(config.db_file)
     try:
         stats = run_once(
-            config, store, client, fetch=uploads.fetch, durations=uploads.durations
+            config, store, client, fetch=uploads.fetch, video_meta=uploads.video_meta
         )
         log.info("회차 끝 — %s", stats.summary())
         return 0

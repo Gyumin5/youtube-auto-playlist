@@ -17,6 +17,8 @@ from __future__ import annotations
 import logging
 import re
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence
 
@@ -36,7 +38,10 @@ log = logging.getLogger(__name__)
 PAGE_SIZE = 15
 
 # videos.list 는 한 번에 50개까지 묻는다. 우리는 15개라 늘 한 번에 끝난다.
-DURATION_BATCH = 50
+META_BATCH = 50
+
+# 쇼츠는 3분을 넘지 못한다. 그보다 긴 영상은 물어볼 것도 없다.
+SHORTS_MAX_SECONDS = 180
 
 # 유튜브가 주는 길이 표기. 예: PT1H24M9S, PT47S, P1DT2H (라이브 다시보기가 하루를 넘기면 D 가 붙는다)
 DURATION_RE = re.compile(
@@ -81,6 +86,10 @@ class LookupTransientError(ChannelLookupError):
     """몇 번 다시 걸어도 못 읽었다. 다음 회차에 다시 본다."""
 
 
+class ShortsCheckFailed(Exception):
+    """쇼츠인지 물어보지 못했다. 그 영상 하나만 다음 회차로 넘긴다."""
+
+
 @dataclass(frozen=True)
 class Video:
     video_id: str
@@ -91,6 +100,49 @@ class Video:
     @property
     def url(self) -> str:
         return f"https://www.youtube.com/watch?v={self.video_id}"
+
+
+@dataclass(frozen=True)
+class VideoMeta:
+    """영상 하나를 넣을지 가리는 데 필요한 값. videos.list 한 호출(1단위)로 같이 받는다."""
+
+    duration_seconds: int
+    is_live: bool
+
+
+def is_short(video_id: str, timeout: int = 10) -> bool:
+    """그 영상이 쇼츠인가. 쇼츠 주소로 머리만 물어본다 — 할당량을 안 쓴다.
+
+    쇼츠면 그 주소가 그대로 200 이고, 아니면 303 으로 일반 보기 주소로 보낸다. 길이로
+    가르지 않는 이유는 짧은 가로 영상이 실제로 있기 때문이다 — 1~2분짜리 일반 영상을
+    쇼츠로 오해하면 운영자가 보려던 것이 통째로 빠진다.
+    """
+    request = urllib.request.Request(
+        f"https://www.youtube.com/shorts/{video_id}",
+        method="HEAD",
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    try:
+        with _no_redirect_opener.open(request, timeout=timeout) as response:
+            return response.status == 200
+    except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return False
+        raise ShortsCheckFailed(
+            f"{video_id}: 쇼츠인지 물어보지 못했다 (상태 {exc.code})."
+        ) from exc
+    except Exception as exc:  # 연결 실패·제한시간
+        raise ShortsCheckFailed(f"{video_id}: 쇼츠인지 물어보지 못했다 — {exc}.") from exc
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """리다이렉트를 따라가지 않는다 — 따라가면 쇼츠와 일반 영상이 똑같이 200 이 된다."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_no_redirect_opener = urllib.request.build_opener(_NoRedirect)
 
 
 def uploads_playlist_id(channel_id: str) -> str:
@@ -129,33 +181,41 @@ class UploadsClient:
         )
         return _to_videos(response, channel_id)
 
-    def durations(self, video_ids: Sequence[str], timeout: int = 20) -> Dict[str, int]:
-        """영상마다 길이를 초로 돌려준다. 길이를 못 받은 영상은 빠진다.
+    def video_meta(self, video_ids: Sequence[str], timeout: int = 20) -> Dict[str, VideoMeta]:
+        """영상마다 길이와 라이브 여부를 돌려준다. 값을 못 받은 영상은 빠진다.
 
-        길이는 영상 목록에 안 들어 있어서 따로 묻는다. 한 번에 쉰 개까지라 열다섯 개는
+        둘 다 영상 목록에 안 들어 있어서 따로 묻는다. 한 번에 쉰 개까지라 열다섯 개는
         한 호출(1단위)로 끝난다. timeout 은 fetch 와 같은 이유로 받기만 한다.
+
+        라이브 판정은 liveStreamingDetails 가 붙어 있는가로 한다. 예약도 진행 중도 끝난
+        다시보기도 그 칸을 들고 있어서 셋이 한 번에 걸린다.
         """
         ids = list(video_ids)
         if not ids:
             return {}
 
-        lengths: Dict[str, int] = {}
-        for start in range(0, len(ids), DURATION_BATCH):
-            chunk = ids[start:start + DURATION_BATCH]
+        meta: Dict[str, VideoMeta] = {}
+        for start in range(0, len(ids), META_BATCH):
+            chunk = ids[start:start + META_BATCH]
             response = self._execute(
                 lambda c=chunk: self.youtube.videos().list(
-                    part="contentDetails", id=",".join(c), maxResults=DURATION_BATCH
+                    part="contentDetails,liveStreamingDetails",
+                    id=",".join(c),
+                    maxResults=META_BATCH,
                 ),
-                label="영상 길이",
-                not_accessible="영상 길이를 물을 수 없다. 권한을 본다.",
+                label="영상 정보",
+                not_accessible="영상 정보를 물을 수 없다. 권한을 본다.",
             )
             for item in response.get("items", []):
                 seconds = parse_duration((item.get("contentDetails") or {}).get("duration", ""))
                 if seconds is None:
                     log.warning("영상 %s 의 길이 표기를 못 읽었다.", item.get("id"))
                     continue
-                lengths[item["id"]] = seconds
-        return lengths
+                meta[item["id"]] = VideoMeta(
+                    duration_seconds=seconds,
+                    is_live=bool(item.get("liveStreamingDetails")),
+                )
+        return meta
 
     def _execute(self, make_request: Callable, label: str, not_accessible: str):
         attempt = 0

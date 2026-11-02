@@ -12,8 +12,11 @@ from youtube_auto.errors import QuotaExceeded  # noqa: E402
 from youtube_auto.uploads import (  # noqa: E402
     PAGE_SIZE,
     LookupTransientError,
+    ShortsCheckFailed,
     UploadsClient,
     UploadsNotAccessible,
+    VideoMeta,
+    is_short,
     parse_duration,
     uploads_playlist_id,
 )
@@ -191,24 +194,39 @@ class ParseDurationTest(unittest.TestCase):
         self.assertIsNone(parse_duration("몰라"))
 
 
-class DurationsTest(unittest.TestCase):
+class VideoMetaTest(unittest.TestCase):
     def client(self, outcomes):
         youtube = FakeYouTube(outcomes)
         return UploadsClient(youtube, sleep=lambda _s: None), youtube
 
-    def test_영상마다_길이를_초로_돌려준다(self):
+    def test_영상마다_길이와_라이브_여부를_돌려준다(self):
         client, youtube = self.client([
             {"items": [
                 {"id": "v1", "contentDetails": {"duration": "PT46M52S"}},
                 {"id": "v2", "contentDetails": {"duration": "PT47S"}},
             ]}
         ])
-        lengths = client.durations(["v1", "v2"])
+        meta = client.video_meta(["v1", "v2"])
 
-        self.assertEqual(lengths, {"v1": 2812, "v2": 47})
+        self.assertEqual(meta["v1"], VideoMeta(duration_seconds=2812, is_live=False))
+        self.assertEqual(meta["v2"], VideoMeta(duration_seconds=47, is_live=False))
         self.assertEqual(youtube.endpoints, ["videos"])
         self.assertEqual(youtube.calls[0]["id"], "v1,v2")
-        self.assertEqual(youtube.calls[0]["part"], "contentDetails")
+        self.assertEqual(youtube.calls[0]["part"], "contentDetails,liveStreamingDetails")
+
+    def test_라이브_칸이_있으면_라이브로_본다(self):
+        # 예약도 진행 중도 끝난 다시보기도 이 칸을 들고 있다.
+        client, _ = self.client([
+            {"items": [{
+                "id": "v1",
+                "contentDetails": {"duration": "P0D"},
+                "liveStreamingDetails": {"scheduledStartTime": "2026-11-02T12:00:00Z"},
+            }]}
+        ])
+        meta = client.video_meta(["v1"])
+
+        self.assertTrue(meta["v1"].is_live)
+        self.assertEqual(meta["v1"].duration_seconds, 0)
 
     def test_한_번에_묻는다(self):
         # 열다섯 개짜리 목록이 호출 하나(1단위)로 끝나야 한다.
@@ -216,7 +234,7 @@ class DurationsTest(unittest.TestCase):
         client, youtube = self.client([
             {"items": [{"id": i, "contentDetails": {"duration": "PT10M"}} for i in ids]}
         ])
-        client.durations(ids)
+        client.video_meta(ids)
 
         self.assertEqual(len(youtube.calls), 1)
 
@@ -227,19 +245,72 @@ class DurationsTest(unittest.TestCase):
                 {"id": "v2", "contentDetails": {}},
             ]}
         ])
-        lengths = client.durations(["v1", "v2"])
+        meta = client.video_meta(["v1", "v2"])
 
-        self.assertEqual(lengths, {"v1": 600})
+        self.assertEqual(list(meta), ["v1"])
 
     def test_물을_것이_없으면_부르지도_않는다(self):
         client, youtube = self.client([])
-        self.assertEqual(client.durations([]), {})
+        self.assertEqual(client.video_meta([]), {})
         self.assertEqual(youtube.calls, [])
 
     def test_할당량_소진은_그대로_올린다(self):
         client, _ = self.client([http_error(403, "quotaExceeded")])
         with self.assertRaises(QuotaExceeded):
-            client.durations(["v1"])
+            client.video_meta(["v1"])
+
+
+class IsShortTest(unittest.TestCase):
+    """쇼츠 주소가 그대로 열리면 쇼츠, 일반 보기로 넘기면 아니다."""
+
+    def call(self, outcome):
+        import youtube_auto.uploads as uploads
+
+        class FakeOpener:
+            def open(self, request, timeout=None):
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return FakeHead(outcome)
+
+        original = uploads._no_redirect_opener
+        uploads._no_redirect_opener = FakeOpener()
+        try:
+            return is_short("abc123")
+        finally:
+            uploads._no_redirect_opener = original
+
+    def test_200이면_쇼츠다(self):
+        self.assertTrue(self.call(200))
+
+    def test_303이면_쇼츠가_아니다(self):
+        self.assertFalse(self.call(http_redirect(303)))
+
+    def test_물어보지_못하면_올린다(self):
+        with self.assertRaises(ShortsCheckFailed):
+            self.call(OSError("연결 안 됨"))
+
+    def test_뜻밖의_상태도_올린다(self):
+        # 모르는 답을 쇼츠가 아닌 것으로 치면 쇼츠가 조용히 들어간다.
+        with self.assertRaises(ShortsCheckFailed):
+            self.call(http_redirect(500))
+
+
+class FakeHead:
+    def __init__(self, status):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def http_redirect(code):
+    import urllib.error
+    return urllib.error.HTTPError(
+        "https://www.youtube.com/shorts/abc123", code, "redirect", {}, None
+    )
 
 
 if __name__ == "__main__":

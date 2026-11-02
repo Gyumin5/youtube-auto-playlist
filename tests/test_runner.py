@@ -14,13 +14,35 @@ from youtube_auto.playlist import (  # noqa: E402
     PlaylistNotUsable,
     VideoNotAddable,
 )
-from youtube_auto.runner import next_delay, run_once  # noqa: E402
+from youtube_auto.runner import next_delay  # noqa: E402
+from youtube_auto.runner import run_once as _run_once  # noqa: E402
 from youtube_auto.store import ReadOnlyStore, Store  # noqa: E402
 from youtube_auto.uploads import (  # noqa: E402
     LookupTransientError,
+    ShortsCheckFailed,
     UploadsNotAccessible,
     Video,
+    VideoMeta,
 )
+
+
+def plain_meta(video_ids, timeout=20):
+    """쇼츠도 라이브도 아닌 평범한 10분짜리. 그 판정이 주제가 아닌 검사의 기본값이다."""
+    return {vid: VideoMeta(duration_seconds=600, is_live=False) for vid in video_ids}
+
+
+def never_short(video_id, timeout=20):
+    raise AssertionError(f"쇼츠인지 물을 일이 없다: {video_id}")
+
+
+def run_once(config, store, client, fetch=None, video_meta=None, **kw):
+    """검사용 겹 — 길이·쇼츠·라이브가 주제가 아닌 검사는 기본값으로 돈다."""
+    return _run_once(
+        config, store, client,
+        fetch=fetch,
+        video_meta=plain_meta if video_meta is None else video_meta,
+        **kw,
+    )
 
 CH_A = "UC_x5XG1OV2P6uZZ5FSM9Ttw"
 CH_B = "UCBJycsmduvYEL83R_U4JriQ"
@@ -385,8 +407,8 @@ class RunOnceTest(unittest.TestCase):
         self.assertIn("넣음 1개", stats.summary())
 
 
-class MinDurationTest(unittest.TestCase):
-    """최소 길이를 적은 채널 — 짧은 영상은 거르고 기록해 다시 묻지 않는다."""
+class VideoFilterTest(unittest.TestCase):
+    """넣기 전에 가리는 셋 — 쇼츠, 라이브, 채널마다 정한 최소 길이."""
 
     def setUp(self):
         self.store = Store(":memory:")
@@ -399,23 +421,45 @@ class MinDurationTest(unittest.TestCase):
     def tearDown(self):
         self.store.close()
 
-    def make_durations(self, mapping):
-        def durations(video_ids, timeout=20):
-            durations.calls.append(list(video_ids))
-            result = mapping
-            if isinstance(result, Exception):
-                raise result
-            return {vid: result[vid] for vid in video_ids if vid in result}
+    def make_meta(self, mapping):
+        """mapping 은 {영상: 초} 또는 {영상: VideoMeta}. 예외를 주면 그걸 던진다."""
+        def video_meta(video_ids, timeout=20):
+            video_meta.calls.append(list(video_ids))
+            if isinstance(mapping, Exception):
+                raise mapping
+            out = {}
+            for vid in video_ids:
+                if vid not in mapping:
+                    continue
+                value = mapping[vid]
+                out[vid] = (
+                    value if isinstance(value, VideoMeta)
+                    else VideoMeta(duration_seconds=value, is_live=False)
+                )
+            return out
 
-        durations.calls = []
-        return durations
+        video_meta.calls = []
+        return video_meta
+
+    def make_shorts_check(self, shorts):
+        """shorts 는 쇼츠인 영상 아이디 집합. 예외를 주면 그걸 던진다."""
+        def shorts_check(video_id, timeout=20):
+            shorts_check.calls.append(video_id)
+            if isinstance(shorts, Exception):
+                raise shorts
+            return video_id in shorts
+
+        shorts_check.calls = []
+        return shorts_check
+
+    # --- 최소 길이
 
     def test_기준보다_짧은_영상은_넣지_않는다(self):
         fetch = make_fetch({CH_A: [video("본편", CH_A), video("예고", CH_A)], CH_B: []})
-        durations = self.make_durations({"본편": 2812, "예고": 47})
         client = RecordingClient()
-        stats = run_once(make_config(self.rules), self.store, client,
-                         fetch=fetch, durations=durations)
+        stats = run_once(make_config(self.rules), self.store, client, fetch=fetch,
+                         video_meta=self.make_meta({"본편": 2812, "예고": 600}),
+                         shorts_check=never_short)
 
         self.assertEqual(client.calls, [("본편", PL_A)])
         self.assertEqual(stats.too_short, 1)
@@ -423,62 +467,140 @@ class MinDurationTest(unittest.TestCase):
 
     def test_걸러낸_영상은_기록해_다음_회차에_다시_묻지_않는다(self):
         fetch = make_fetch({CH_A: [video("예고", CH_A)], CH_B: []})
-        durations = self.make_durations({"예고": 47})
-        run_once(make_config(self.rules), self.store, RecordingClient(),
-                 fetch=fetch, durations=durations)
+        run_once(make_config(self.rules), self.store, RecordingClient(), fetch=fetch,
+                 video_meta=self.make_meta({"예고": 600}), shorts_check=never_short)
 
-        again = self.make_durations({"예고": 47})
+        again = self.make_meta({"예고": 600})
         stats = run_once(make_config(self.rules), self.store, RecordingClient(),
                          fetch=make_fetch({CH_A: [video("예고", CH_A)], CH_B: []}),
-                         durations=again)
+                         video_meta=again, shorts_check=never_short)
 
         self.assertEqual(again.calls, [])  # 물을 것이 없으니 할당량도 안 쓴다
         self.assertEqual(stats.too_short, 0)
 
-    def test_최소_길이가_없는_채널은_길이를_묻지_않는다(self):
+    def test_최소_길이가_없는_채널은_길이로_거르지_않는다(self):
         fetch = make_fetch({CH_A: [], CH_B: [video("b1", CH_B)]})
-        durations = self.make_durations({})
-        run_once(make_config(self.rules), self.store, RecordingClient(),
-                 fetch=fetch, durations=durations)
-
-        self.assertEqual(durations.calls, [])
-
-    def test_길이를_못_받은_영상은_보류하고_기록도_안_한다(self):
-        fetch = make_fetch({CH_A: [video("모름", CH_A)], CH_B: []})
-        durations = self.make_durations({})  # 그 영상이 답에 없다
         client = RecordingClient()
-        stats = run_once(make_config(self.rules), self.store, client,
-                         fetch=fetch, durations=durations)
+        stats = run_once(make_config(self.rules), self.store, client, fetch=fetch,
+                         video_meta=self.make_meta({"b1": 600}), shorts_check=never_short)
+
+        self.assertEqual(client.calls, [("b1", PL_B)])
+        self.assertEqual(stats.too_short, 0)
+
+    # --- 쇼츠
+
+    def test_쇼츠는_넣지_않고_기록한다(self):
+        fetch = make_fetch({CH_B: [video("쇼츠", CH_B)], CH_A: []})
+        shorts_check = self.make_shorts_check({"쇼츠"})
+        client = RecordingClient()
+        stats = run_once(make_config(self.rules), self.store, client, fetch=fetch,
+                         video_meta=self.make_meta({"쇼츠": 35}),
+                         shorts_check=shorts_check)
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(stats.shorts, 1)
+        self.assertTrue(self.store.is_added("쇼츠", PL_B))
+
+    def test_짧아도_쇼츠가_아니면_넣는다(self):
+        # 1~2분짜리 가로 영상이 실제로 있다. 길이만으로 가르면 이것이 통째로 빠진다.
+        fetch = make_fetch({CH_B: [video("짧은가로", CH_B)], CH_A: []})
+        shorts_check = self.make_shorts_check(set())
+        client = RecordingClient()
+        stats = run_once(make_config(self.rules), self.store, client, fetch=fetch,
+                         video_meta=self.make_meta({"짧은가로": 98}),
+                         shorts_check=shorts_check)
+
+        self.assertEqual(client.calls, [("짧은가로", PL_B)])
+        self.assertEqual(shorts_check.calls, ["짧은가로"])
+        self.assertEqual(stats.shorts, 0)
+
+    def test_긴_영상은_쇼츠인지_묻지_않는다(self):
+        fetch = make_fetch({CH_B: [video("본편", CH_B)], CH_A: []})
+        shorts_check = self.make_shorts_check(set())
+        run_once(make_config(self.rules), self.store, RecordingClient(), fetch=fetch,
+                 video_meta=self.make_meta({"본편": 181}), shorts_check=shorts_check)
+
+        self.assertEqual(shorts_check.calls, [])
+
+    def test_쇼츠인지_못_물으면_보류하고_기록도_안_한다(self):
+        fetch = make_fetch({CH_B: [video("모름", CH_B)], CH_A: []})
+        client = RecordingClient()
+        stats = run_once(make_config(self.rules), self.store, client, fetch=fetch,
+                         video_meta=self.make_meta({"모름": 40}),
+                         shorts_check=self.make_shorts_check(ShortsCheckFailed("못 물음")))
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(stats.shorts, 0)
+        self.assertFalse(self.store.is_added("모름", PL_B))
+
+    # --- 라이브
+
+    def test_라이브는_넣지_않고_기록한다(self):
+        # 예약도 진행 중도 끝난 다시보기도 같다. 기록해야 끝난 뒤에 안 들어간다.
+        fetch = make_fetch({CH_B: [video("생방", CH_B)], CH_A: []})
+        client = RecordingClient()
+        stats = run_once(
+            make_config(self.rules), self.store, client, fetch=fetch,
+            video_meta=self.make_meta({"생방": VideoMeta(duration_seconds=0, is_live=True)}),
+            shorts_check=never_short,
+        )
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(stats.live, 1)
+        self.assertTrue(self.store.is_added("생방", PL_B))
+
+    def test_라이브는_길이가_0이어도_쇼츠로_세지_않는다(self):
+        fetch = make_fetch({CH_B: [video("생방", CH_B)], CH_A: []})
+        shorts_check = self.make_shorts_check({"생방"})
+        stats = run_once(
+            make_config(self.rules), self.store, RecordingClient(), fetch=fetch,
+            video_meta=self.make_meta({"생방": VideoMeta(duration_seconds=0, is_live=True)}),
+            shorts_check=shorts_check,
+        )
+
+        self.assertEqual(shorts_check.calls, [])
+        self.assertEqual(stats.shorts, 0)
+        self.assertEqual(stats.live, 1)
+
+    # --- 조회 자체가 실패할 때
+
+    def test_정보를_못_받은_영상은_보류하고_기록도_안_한다(self):
+        fetch = make_fetch({CH_A: [video("모름", CH_A)], CH_B: []})
+        client = RecordingClient()
+        stats = run_once(make_config(self.rules), self.store, client, fetch=fetch,
+                         video_meta=self.make_meta({}),  # 그 영상이 답에 없다
+                         shorts_check=never_short)
 
         self.assertEqual(client.calls, [])
         self.assertEqual(stats.too_short, 0)
         self.assertFalse(self.store.is_added("모름", PL_A))
 
-    def test_길이_조회_할당량이_소진되면_회차를_끝낸다(self):
+    def test_정보_조회_할당량이_소진되면_회차를_끝낸다(self):
         fetch = make_fetch({CH_A: [video("본편", CH_A)], CH_B: [video("b1", CH_B)]})
-        durations = self.make_durations(QuotaExceeded("오늘 치 끝"))
         client = RecordingClient()
-        stats = run_once(make_config(self.rules), self.store, client,
-                         fetch=fetch, durations=durations)
+        stats = run_once(make_config(self.rules), self.store, client, fetch=fetch,
+                         video_meta=self.make_meta(QuotaExceeded("오늘 치 끝")),
+                         shorts_check=never_short)
 
         self.assertTrue(stats.quota_exceeded)
         self.assertEqual(client.calls, [])
         self.assertEqual(fetch.calls, [CH_A])  # 다음 채널은 조회도 안 한다
 
-    def test_길이를_못_물으면_그_채널만_건너뛴다(self):
+    def test_정보를_못_물으면_그_채널만_건너뛴다(self):
         fetch = make_fetch({CH_A: [video("본편", CH_A)], CH_B: [video("b1", CH_B)]})
-        durations = self.make_durations(LookupTransientError("못 물음"))
         client = RecordingClient()
-        stats = run_once(make_config(self.rules), self.store, client,
-                         fetch=fetch, durations=durations)
+        stats = run_once(make_config(self.rules), self.store, client, fetch=fetch,
+                         video_meta=self.make_meta(LookupTransientError("못 물음")),
+                         shorts_check=never_short)
 
-        self.assertEqual(client.calls, [("b1", PL_B)])
-        self.assertEqual(stats.lookup_errors, 1)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(stats.lookup_errors, 2)
 
-    def test_최소_길이를_적었는데_길이를_물을_방법이_없으면_거절한다(self):
+    def test_영상_정보를_물을_방법이_없으면_거절한다(self):
         fetch = make_fetch({CH_A: [video("본편", CH_A)], CH_B: []})
         with self.assertRaises(TypeError):
-            run_once(make_config(self.rules), self.store, RecordingClient(), fetch=fetch)
+            _run_once(make_config(self.rules), self.store, RecordingClient(), fetch=fetch)
+
 
 
 class NextDelayTest(unittest.TestCase):

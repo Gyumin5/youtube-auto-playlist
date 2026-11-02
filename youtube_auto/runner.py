@@ -19,7 +19,13 @@ from typing import Callable, Optional
 
 from .errors import QuotaExceeded, TransientError
 from .playlist import ADDED, DRY_RUN, DUPLICATE, PlaylistNotUsable, VideoNotAddable
-from .uploads import ChannelLookupError, UploadsNotAccessible
+from .uploads import (
+    SHORTS_MAX_SECONDS,
+    ChannelLookupError,
+    ShortsCheckFailed,
+    UploadsNotAccessible,
+    is_short,
+)
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +40,8 @@ class RunStats:
     duplicates: int = 0
     seeded: int = 0
     too_short: int = 0
+    shorts: int = 0
+    live: int = 0
     skipped_videos: int = 0
     playlist_errors: int = 0
     quota_exceeded: bool = False
@@ -46,7 +54,7 @@ class RunStats:
         return (
             f"채널 {self.channels}개 · 새 영상 {self.new_videos}개 · 넣음 {self.added}개 · "
             f"이미 있음 {self.duplicates}개 · 첫 회차 기록만 {self.seeded}개 · "
-            f"짧아서 거름 {self.too_short}개 · "
+            f"쇼츠 {self.shorts}개 · 라이브 {self.live}개 · 짧아서 거름 {self.too_short}개 · "
             f"건너뜀 {self.skipped_videos}개 · 조회 오류 {self.lookup_errors}개 · "
             f"재생목록 오류 {self.playlist_errors}개"
             + (" · 할당량 소진" if self.quota_exceeded else "")
@@ -58,16 +66,21 @@ def run_once(
     store,
     client,
     fetch: Optional[Callable] = None,
-    durations: Optional[Callable] = None,
+    video_meta: Optional[Callable] = None,
+    shorts_check: Callable = is_short,
 ) -> RunStats:
     """한 회차를 돈다.
 
     fetch 는 채널 아이디를 받아 영상 목록을 돌려준다 (UploadsClient.fetch).
-    durations 는 영상 아이디 목록을 받아 길이를 초로 돌려준다 (UploadsClient.durations).
-    최소 길이를 적은 채널이 있을 때만 쓴다.
+    video_meta 는 영상 아이디 목록을 받아 길이와 라이브 여부를 돌려준다
+    (UploadsClient.video_meta). shorts_check 는 영상 하나가 쇼츠인지 묻는다.
     """
     if fetch is None:
         raise TypeError("fetch 를 넘겨야 한다 — 조회에도 로그인한 계정이 필요하다.")
+    if video_meta is None:
+        raise TypeError(
+            "video_meta 를 넘겨야 한다 — 쇼츠·라이브를 가리려면 영상 정보가 있어야 한다."
+        )
     stats = RunStats()
 
     for rule in config.channels:
@@ -115,53 +128,81 @@ def run_once(
             log.debug("%s: 새 영상 없음", rule.name)
             continue
 
-        if rule.min_duration_seconds:
-            if durations is None:
-                raise TypeError(
-                    f"{rule.name}: 최소 길이를 적었는데 길이를 물을 방법이 없다 — "
-                    "durations 를 넘겨야 한다."
-                )
-            try:
-                lengths = durations(
-                    [v.video_id for v in fresh], timeout=config.request_timeout_seconds
-                )
-            except QuotaExceeded as exc:
-                log.error("할당량 소진이라 이번 회차를 여기서 끝낸다 — %s", exc)
-                stats.quota_exceeded = True
-                return stats
-            except ChannelLookupError as exc:
-                # 길이를 모르면 넣을지 가릴 수 없다. 짧은 것을 넣느니 다음 회차에 다시 본다.
-                store.record_lookup_failure(rule.channel_id, str(exc))
-                stats.lookup_errors += 1
-                log.warning("%s: 길이를 못 물었다 — %s", rule.name, exc)
+        try:
+            meta = video_meta(
+                [v.video_id for v in fresh], timeout=config.request_timeout_seconds
+            )
+        except QuotaExceeded as exc:
+            log.error("할당량 소진이라 이번 회차를 여기서 끝낸다 — %s", exc)
+            stats.quota_exceeded = True
+            return stats
+        except ChannelLookupError as exc:
+            # 영상 정보를 모르면 쇼츠·라이브를 가릴 수 없다. 넣느니 다음 회차에 다시 본다.
+            store.record_lookup_failure(rule.channel_id, str(exc))
+            stats.lookup_errors += 1
+            log.warning("%s: 영상 정보를 못 물었다 — %s", rule.name, exc)
+            continue
+
+        kept = []
+        dropped = {"쇼츠": 0, "라이브": 0, "짧은 것": 0}
+        for video in fresh:
+            info = meta.get(video.video_id)
+            if info is None:
+                # 정보를 못 받은 영상만 보류한다. 기록하지 않으니 다음 회차에 다시 본다.
+                log.warning("%s: 정보를 모르는 영상은 다음 회차에 다시 본다 — %s",
+                            rule.name, video.title)
                 continue
 
-            kept = []
-            for video in fresh:
-                seconds = lengths.get(video.video_id)
-                if seconds is None:
-                    # 길이를 못 받은 영상만 보류한다. 기록하지 않으니 다음 회차에 다시 본다.
-                    log.warning("%s: 길이를 모르는 영상은 다음 회차에 다시 본다 — %s",
-                                rule.name, video.title)
+            if info.is_live:
+                # 예약도 진행 중도 끝난 다시보기도 안 넣는다. 기록해 두지 않으면 예약이
+                # 끝나 다시보기가 된 뒤에 들어간다.
+                store.mark_added(
+                    video.video_id, rule.playlist_id, rule.channel_id,
+                    title=video.title, published_at=video.published, source="live",
+                )
+                stats.live += 1
+                dropped["라이브"] += 1
+                continue
+
+            if info.duration_seconds <= SHORTS_MAX_SECONDS:
+                try:
+                    short = shorts_check(
+                        video.video_id, timeout=config.request_timeout_seconds
+                    )
+                except ShortsCheckFailed as exc:
+                    # 쇼츠인지 모르는 채로 넣으면 거르는 뜻이 없어진다. 다음 회차에 다시 본다.
+                    log.warning("%s: %s 다음 회차에 다시 본다.", rule.name, exc)
                     continue
-                if seconds < rule.min_duration_seconds:
-                    # 기록해 둔다. 안 그러면 목록에 남아 있는 동안 회차마다 다시 묻는다.
+                if short:
                     store.mark_added(
                         video.video_id, rule.playlist_id, rule.channel_id,
-                        title=video.title, published_at=video.published, source="too_short",
+                        title=video.title, published_at=video.published, source="shorts",
                     )
-                    stats.too_short += 1
+                    stats.shorts += 1
+                    dropped["쇼츠"] += 1
                     continue
-                kept.append(video)
 
-            if len(kept) < len(fresh):
-                log.info(
-                    "%s: %d개 중 %d개만 %d분 기준을 넘는다.",
-                    rule.name, len(fresh), len(kept), rule.min_duration_seconds // 60,
+            if rule.min_duration_seconds and info.duration_seconds < rule.min_duration_seconds:
+                # 기록해 둔다. 안 그러면 목록에 남아 있는 동안 회차마다 다시 묻는다.
+                store.mark_added(
+                    video.video_id, rule.playlist_id, rule.channel_id,
+                    title=video.title, published_at=video.published, source="too_short",
                 )
-            fresh = kept
-            if not fresh:
+                stats.too_short += 1
+                dropped["짧은 것"] += 1
                 continue
+
+            kept.append(video)
+
+        if any(dropped.values()):
+            reasons = ", ".join(f"{k} {v}개" for k, v in dropped.items() if v)
+            log.info(
+                "%s: %d개 중 %d개를 넣는다 — 거른 것: %s.",
+                rule.name, len(fresh), len(kept), reasons,
+            )
+        fresh = kept
+        if not fresh:
+            continue
 
         stats.new_videos += len(fresh)
         batch = fresh[: config.max_videos_per_channel_per_run]
@@ -233,7 +274,8 @@ def run_forever(
     store,
     client,
     fetch: Optional[Callable] = None,
-    durations: Optional[Callable] = None,
+    video_meta: Optional[Callable] = None,
+    shorts_check: Callable = is_short,
     stop=None,
 ) -> None:
     blackout = False  # 직전 회차에 어느 채널도 못 읽었나
@@ -241,7 +283,10 @@ def run_forever(
         if stop is not None and stop.is_set():
             break
         try:
-            stats = run_once(config, store, client, fetch=fetch, durations=durations)
+            stats = run_once(
+                config, store, client,
+                fetch=fetch, video_meta=video_meta, shorts_check=shorts_check,
+            )
             log.info("회차 끝 — %s", stats.summary())
             if stats.all_lookups_failed and not stats.quota_exceeded:
                 if not blackout:
