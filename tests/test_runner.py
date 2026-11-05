@@ -605,6 +605,64 @@ class VideoFilterTest(unittest.TestCase):
         self.assertEqual(stats.shorts, 0)
         self.assertEqual(stats.live, 1)
 
+    # --- 제목으로 거르기 (title_exclude)
+
+    def title_rules(self):
+        """CH_B 에서 제목에 'PD수첩.zip' 이 든 영상을 거르는 설정."""
+        return (
+            self.rules[0],
+            ChannelRule(name="제목거름", channel_id=CH_B, playlist_id=PL_B,
+                        title_exclude=("pd수첩.zip",)),
+        )
+
+    def test_제외어가_든_제목은_넣지_않고_기록한다(self):
+        fetch = make_fetch({
+            CH_B: [video("요약", CH_B, title="PD수첩.zip | 그 사건 10분 정리"),
+                   video("본편", CH_B, title="PD수첩 - 그 사건")],
+            CH_A: [],
+        })
+        client = RecordingClient()
+        stats = run_once(make_config(self.title_rules()), self.store, client, fetch=fetch,
+                         video_meta=self.make_meta({"요약": 600, "본편": 3600}),
+                         shorts_check=never_short)
+
+        self.assertEqual(client.calls, [("본편", PL_B)])
+        self.assertEqual(stats.title_excluded, 1)
+        self.assertEqual(stats.added, 1)
+        self.assertTrue(self.store.is_added("요약", PL_B))
+
+    def test_제외어는_대소문자를_안_가린다(self):
+        fetch = make_fetch({CH_B: [video("요약", CH_B, title="[ZIP] pd수첩.ZIP 모음")], CH_A: []})
+        client = RecordingClient()
+        stats = run_once(make_config(self.title_rules()), self.store, client, fetch=fetch,
+                         video_meta=self.make_meta({"요약": 600}), shorts_check=never_short)
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(stats.title_excluded, 1)
+
+    def test_제외어를_안_적은_채널은_제목으로_거르지_않는다(self):
+        fetch = make_fetch({CH_A: [video("요약", CH_A, title="PD수첩.zip 정리")], CH_B: []})
+        client = RecordingClient()
+        stats = run_once(make_config(self.title_rules()), self.store, client, fetch=fetch,
+                         video_meta=self.make_meta({"요약": 3600}), shorts_check=never_short)
+
+        self.assertEqual(client.calls, [("요약", PL_A)])
+        self.assertEqual(stats.title_excluded, 0)
+
+    def test_제목으로_거른_영상은_다음_회차에_다시_묻지_않는다(self):
+        title = "PD수첩.zip | 그 사건 10분 정리"
+        run_once(make_config(self.title_rules()), self.store, RecordingClient(),
+                 fetch=make_fetch({CH_B: [video("요약", CH_B, title=title)], CH_A: []}),
+                 video_meta=self.make_meta({"요약": 600}), shorts_check=never_short)
+
+        again = self.make_meta({"요약": 600})
+        stats = run_once(make_config(self.title_rules()), self.store, RecordingClient(),
+                         fetch=make_fetch({CH_B: [video("요약", CH_B, title=title)], CH_A: []}),
+                         video_meta=again, shorts_check=never_short)
+
+        self.assertEqual(again.calls, [])  # 물을 것이 없으니 할당량도 안 쓴다
+        self.assertEqual(stats.title_excluded, 0)
+
     # --- 조회 자체가 실패할 때
 
     def test_정보를_못_받은_영상은_보류하고_기록도_안_한다(self):

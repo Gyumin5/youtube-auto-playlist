@@ -68,6 +68,9 @@ class ChannelRule:
 
     include_shorts 가 참이면 그 채널만 쇼츠도 넣는다. 올리는 것이 거의 다 쇼츠인 채널을
     전용 재생목록으로 통째로 받을 때 쓴다. 라이브는 이 칸과 상관없이 전 채널에서 거른다.
+
+    title_exclude 에 적은 말이 제목에 들어 있으면 그 영상은 안 넣는다. 한 채널이 본편과
+    다른 꼭지를 같이 올리는데 길이로는 안 갈릴 때 쓴다. 대소문자는 안 가린다.
     """
 
     name: str
@@ -75,6 +78,7 @@ class ChannelRule:
     playlist_id: str
     min_duration_seconds: int = 0
     include_shorts: bool = False
+    title_exclude: Tuple[str, ...] = ()
 
 
 def daily_lookup_units(channel_count: int, interval_seconds: int) -> int:
@@ -156,6 +160,31 @@ def _check_playlist_id(value: str, where: str) -> str:
     return value
 
 
+def _title_exclude(raw, where: str) -> Tuple[str, ...]:
+    """제목에 들어 있으면 안 넣을 말들. 비교는 대소문자를 안 가린다.
+
+    빈 문자열을 거절하는 이유는 그게 모든 제목에 들어 있다고 판정돼 그 채널을 통째로
+    막기 때문이다. 조용히 지나가면 왜 아무것도 안 들어오는지 설정만 봐서는 안 보인다.
+    """
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        raise ConfigError(
+            f"{where}.title_exclude 는 목록이어야 한다 — 한 개라도 [\"{raw}\"] 로 적는다."
+        )
+    if not isinstance(raw, list):
+        raise ConfigError(f"{where}.title_exclude 는 목록이어야 한다 (받은 값: {raw!r})")
+    out = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError(
+                f"{where}.title_exclude 의 각 항목은 빈칸이 아닌 문자열이어야 한다 "
+                f"(받은 값: {item!r})"
+            )
+        out.append(item.strip().casefold())
+    return tuple(out)
+
+
 def _parse_channels(raw) -> Tuple[ChannelRule, ...]:
     if not isinstance(raw, list) or not raw:
         raise ConfigError("channels 에 채널을 최소 하나 적어야 한다.")
@@ -169,6 +198,7 @@ def _parse_channels(raw) -> Tuple[ChannelRule, ...]:
 
         unknown_keys = set(item) - {
             "name", "channel_id", "playlist_id", "min_duration_minutes", "include_shorts",
+            "title_exclude",
         }
         if unknown_keys:
             raise ConfigError(
@@ -215,6 +245,8 @@ def _parse_channels(raw) -> Tuple[ChannelRule, ...]:
                 "최소 길이가 쇼츠를 전부 걸러서 include_shorts 가 아무 일도 안 한다."
             )
 
+        title_exclude = _title_exclude(item.get("title_exclude"), f"{where}({name})")
+
         seen_channels[channel_id] = where
         rules.append(
             ChannelRule(
@@ -223,6 +255,7 @@ def _parse_channels(raw) -> Tuple[ChannelRule, ...]:
                 playlist_id=playlist_id,
                 min_duration_seconds=min_seconds,
                 include_shorts=include_shorts,
+                title_exclude=title_exclude,
             )
         )
 

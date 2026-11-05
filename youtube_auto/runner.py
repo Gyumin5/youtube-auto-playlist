@@ -42,6 +42,7 @@ class RunStats:
     too_short: int = 0
     shorts: int = 0
     live: int = 0
+    title_excluded: int = 0
     skipped_videos: int = 0
     playlist_errors: int = 0
     quota_exceeded: bool = False
@@ -55,6 +56,7 @@ class RunStats:
             f"채널 {self.channels}개 · 새 영상 {self.new_videos}개 · 넣음 {self.added}개 · "
             f"이미 있음 {self.duplicates}개 · 첫 회차 기록만 {self.seeded}개 · "
             f"쇼츠 {self.shorts}개 · 라이브 {self.live}개 · 짧아서 거름 {self.too_short}개 · "
+            f"제목으로 거름 {self.title_excluded}개 · "
             f"건너뜀 {self.skipped_videos}개 · 조회 오류 {self.lookup_errors}개 · "
             f"재생목록 오류 {self.playlist_errors}개"
             + (" · 할당량 소진" if self.quota_exceeded else "")
@@ -144,8 +146,21 @@ def run_once(
             continue
 
         kept = []
-        dropped = {"쇼츠": 0, "라이브": 0, "짧은 것": 0}
+        dropped = {"쇼츠": 0, "라이브": 0, "짧은 것": 0, "제목": 0}
         for video in fresh:
+            if rule.title_exclude:
+                lowered = video.title.casefold()
+                if any(word in lowered for word in rule.title_exclude):
+                    # 기록해 둔다. 안 그러면 그 영상이 목록에 남아 있는 동안 회차마다 다시 본다.
+                    store.mark_added(
+                        video.video_id, rule.playlist_id, rule.channel_id,
+                        title=video.title, published_at=video.published,
+                        source="title_exclude",
+                    )
+                    stats.title_excluded += 1
+                    dropped["제목"] += 1
+                    continue
+
             info = meta.get(video.video_id)
             if info is None:
                 # 정보를 못 받은 영상만 보류한다. 기록하지 않으니 다음 회차에 다시 본다.

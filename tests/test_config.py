@@ -144,6 +144,41 @@ class ConfigTest(unittest.TestCase):
             self.load(text)
         self.assertIn("include_shorts", str(ctx.exception))
 
+    def test_제목_제외어는_소문자로_모아_둔다(self):
+        text = (
+            f"channels:\n  - name: 가\n    channel_id: {CHANNEL_A}\n"
+            f"    playlist_id: {PLAYLIST_A}\n"
+            '    title_exclude: ["PD수첩.ZIP", "  예고  "]\n'
+            f"  - name: 나\n    channel_id: {CHANNEL_B}\n"
+            f"    playlist_id: {PLAYLIST_B}\ncheck_interval_seconds: 900\n"
+        )
+        config = self.load(text)
+        self.assertEqual(config.channels[0].title_exclude, ("pd수첩.zip", "예고"))
+        self.assertEqual(config.channels[1].title_exclude, ())
+
+    def test_제목_제외어를_목록이_아니라_한_줄로_적으면_거절한다(self):
+        # 문자열을 그대로 받으면 글자 하나하나가 제외어가 되어 전부 막힌다.
+        text = (
+            f"channels:\n  - name: 가\n    channel_id: {CHANNEL_A}\n"
+            f"    playlist_id: {PLAYLIST_A}\n    title_exclude: PD수첩.zip\n"
+            "check_interval_seconds: 900\n"
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            self.load(text)
+        self.assertIn("title_exclude", str(ctx.exception))
+
+    def test_빈_제목_제외어는_거절한다(self):
+        # 빈 말은 모든 제목에 들어 있다고 판정돼 그 채널을 통째로 막는다.
+        for bad in ('[""]', '["   "]', "[35]"):
+            text = (
+                f"channels:\n  - name: 가\n    channel_id: {CHANNEL_A}\n"
+                f"    playlist_id: {PLAYLIST_A}\n    title_exclude: {bad}\n"
+                "check_interval_seconds: 900\n"
+            )
+            with self.assertRaises(ConfigError, msg=f"{bad} 를 받아들였다") as ctx:
+                self.load(text)
+            self.assertIn("title_exclude", str(ctx.exception))
+
     def test_채널마다_재생목록이_따로_붙는다(self):
         config = self.load(GOOD)
         self.assertEqual(len(config.channels), 2)
