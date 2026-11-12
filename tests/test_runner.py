@@ -605,6 +605,40 @@ class VideoFilterTest(unittest.TestCase):
         self.assertEqual(stats.shorts, 0)
         self.assertEqual(stats.live, 1)
 
+    def live_rules(self):
+        """CH_B 만 라이브도 받는 설정."""
+        return (
+            self.rules[0],
+            ChannelRule(name="라이브받음", channel_id=CH_B, playlist_id=PL_B, include_live=True),
+        )
+
+    def test_라이브를_받는_채널은_끝난_다시보기를_넣는다(self):
+        fetch = make_fetch({CH_B: [video("다시보기", CH_B)], CH_A: []})
+        client = RecordingClient()
+        stats = run_once(
+            make_config(self.live_rules()), self.store, client, fetch=fetch,
+            video_meta=self.make_meta({"다시보기": VideoMeta(
+                duration_seconds=5400, is_live=True, live_ended=True)}),
+            shorts_check=never_short,
+        )
+
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(stats.live, 0)
+        self.assertTrue(self.store.is_added("다시보기", PL_B))
+
+    def test_라이브를_받는_채널도_예약_진행중은_기록없이_다음_회차로(self):
+        fetch = make_fetch({CH_B: [video("생방", CH_B)], CH_A: []})
+        client = RecordingClient()
+        stats = run_once(
+            make_config(self.live_rules()), self.store, client, fetch=fetch,
+            video_meta=self.make_meta({"생방": VideoMeta(duration_seconds=0, is_live=True)}),
+            shorts_check=never_short,
+        )
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(stats.live, 0)
+        self.assertFalse(self.store.is_added("생방", PL_B))
+
     # --- 제목으로 거르기 (title_exclude)
 
     def title_rules(self):

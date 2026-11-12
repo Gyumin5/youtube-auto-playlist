@@ -67,7 +67,10 @@ class ChannelRule:
     본편과 같은 채널에서 나오는 경우를 위한 칸이다.
 
     include_shorts 가 참이면 그 채널만 쇼츠도 넣는다. 올리는 것이 거의 다 쇼츠인 채널을
-    전용 재생목록으로 통째로 받을 때 쓴다. 라이브는 이 칸과 상관없이 전 채널에서 거른다.
+    전용 재생목록으로 통째로 받을 때 쓴다.
+
+    include_live 가 참이면 그 채널만 라이브도 넣는다 — 끝나서 다시보기가 된 뒤에 넣고,
+    예약·진행 중인 것은 기록하지 않고 다음 회차에 다시 본다. 기본은 전 채널에서 거른다.
 
     title_exclude 에 적은 말이 제목에 들어 있으면 그 영상은 안 넣는다. 한 채널이 본편과
     다른 꼭지를 같이 올리는데 길이로는 안 갈릴 때 쓴다. 대소문자는 안 가린다.
@@ -78,6 +81,7 @@ class ChannelRule:
     playlist_id: str
     min_duration_seconds: int = 0
     include_shorts: bool = False
+    include_live: bool = False
     title_exclude: Tuple[str, ...] = ()
 
 
@@ -198,7 +202,7 @@ def _parse_channels(raw) -> Tuple[ChannelRule, ...]:
 
         unknown_keys = set(item) - {
             "name", "channel_id", "playlist_id", "min_duration_minutes", "include_shorts",
-            "title_exclude",
+            "include_live", "title_exclude",
         }
         if unknown_keys:
             raise ConfigError(
@@ -245,6 +249,13 @@ def _parse_channels(raw) -> Tuple[ChannelRule, ...]:
                 "최소 길이가 쇼츠를 전부 걸러서 include_shorts 가 아무 일도 안 한다."
             )
 
+        include_live = item.get("include_live", False)
+        if not isinstance(include_live, bool):
+            raise ConfigError(
+                f"{where}({name}).include_live 는 true 또는 false 여야 한다 "
+                f"(받은 값: {include_live!r})"
+            )
+
         title_exclude = _title_exclude(item.get("title_exclude"), f"{where}({name})")
 
         seen_channels[channel_id] = where
@@ -255,6 +266,7 @@ def _parse_channels(raw) -> Tuple[ChannelRule, ...]:
                 playlist_id=playlist_id,
                 min_duration_seconds=min_seconds,
                 include_shorts=include_shorts,
+                include_live=include_live,
                 title_exclude=title_exclude,
             )
         )

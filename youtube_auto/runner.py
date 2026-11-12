@@ -168,7 +168,12 @@ def run_once(
                             rule.name, video.title)
                 continue
 
-            if info.is_live:
+            if info.is_live and rule.include_live and not info.live_ended:
+                # 라이브를 받는 채널이라도 예약·진행 중인 것은 아직 안 넣는다. 기록하지 않으니
+                # 끝나 다시보기가 되면 그 회차에 들어간다.
+                continue
+
+            if info.is_live and not rule.include_live:
                 # 예약도 진행 중도 끝난 다시보기도 안 넣는다. 기록해 두지 않으면 예약이
                 # 끝나 다시보기가 된 뒤에 들어간다.
                 store.mark_added(

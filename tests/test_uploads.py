@@ -227,6 +227,21 @@ class VideoMetaTest(unittest.TestCase):
 
         self.assertTrue(meta["v1"].is_live)
         self.assertEqual(meta["v1"].duration_seconds, 0)
+        self.assertFalse(meta["v1"].live_ended)
+
+    def test_끝난_라이브는_다시보기로_본다(self):
+        client, _ = self.client([
+            {"items": [{
+                "id": "v1",
+                "contentDetails": {"duration": "PT1H30M"},
+                "liveStreamingDetails": {"actualStartTime": "2026-11-02T12:00:00Z",
+                                         "actualEndTime": "2026-11-02T13:30:00Z"},
+            }]}
+        ])
+        meta = client.video_meta(["v1"])
+
+        self.assertTrue(meta["v1"].is_live)
+        self.assertTrue(meta["v1"].live_ended)
 
     def test_한_번에_묻는다(self):
         # 열다섯 개짜리 목록이 호출 하나(1단위)로 끝나야 한다.

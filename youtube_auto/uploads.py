@@ -108,6 +108,7 @@ class VideoMeta:
 
     duration_seconds: int
     is_live: bool
+    live_ended: bool = False   # 라이브가 끝나 다시보기가 됐는가(actualEndTime 이 있다)
 
 
 def is_short(video_id: str, timeout: int = 10) -> bool:
@@ -211,9 +212,11 @@ class UploadsClient:
                 if seconds is None:
                     log.warning("영상 %s 의 길이 표기를 못 읽었다.", item.get("id"))
                     continue
+                live = item.get("liveStreamingDetails") or {}
                 meta[item["id"]] = VideoMeta(
                     duration_seconds=seconds,
-                    is_live=bool(item.get("liveStreamingDetails")),
+                    is_live=bool(live),
+                    live_ended=bool(live.get("actualEndTime")),
                 )
         return meta
 

@@ -133,6 +133,16 @@ class ConfigTest(unittest.TestCase):
             self.load(text)
         self.assertIn("include_shorts", str(ctx.exception))
 
+    def test_라이브_표시가_참거짓이_아니면_거절한다(self):
+        text = (
+            f"channels:\n  - name: 가\n    channel_id: {CHANNEL_A}\n"
+            f"    playlist_id: {PLAYLIST_A}\n    include_live: 네\n"
+            "check_interval_seconds: 900\n"
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            self.load(text)
+        self.assertIn("include_live", str(ctx.exception))
+
     def test_쇼츠_받기와_최소_길이를_같이_쓰면_거절한다(self):
         # 최소 길이가 쇼츠를 전부 걸러서 쇼츠 받기가 아무 일도 안 한다.
         text = (
